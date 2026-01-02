@@ -319,6 +319,29 @@ section[data-testid="stSidebar"] [data-testid="stSidebarNav"] li a svg {
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
+# Mobile responsiveness (applies only on small screens)
+MOBILE_CSS = r"""
+<style>
+@media (max-width: 768px) {
+  /* tighter page padding */
+  .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; }
+  /* make inputs/buttons easier to tap */
+  .stButton > button, .stDownloadButton > button { width: 100% !important; }
+  /* reduce chart/table overflow pain */
+  div[data-testid="stDataFrame"] { overflow-x: auto !important; }
+  /* slightly smaller headings */
+  h1 { font-size: 1.45rem !important; }
+  h2 { font-size: 1.20rem !important; }
+  h3 { font-size: 1.05rem !important; }
+}
+</style>
+"""
+st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
+# View mode override (lets you force card-layout on phones)
+if "view_mode" not in st.session_state:
+    st.session_state["view_mode"] = "Auto"  # Auto | Desktop | Mobile
+
 
 
 # =============================
@@ -942,28 +965,16 @@ def render_undo():
 def require_login():
     if st.session_state.get("authed", False):
         return
-    st.markdown(
-        """
-        <div class="mf-login-wrap mf-anim">
-          <div class="mf-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <div>
-                <p class="mf-login-title">🔐 Sign in</p>
-                <p class="mf-login-sub">Access your <b>NishanthFinTrack</b> vault.</p>
-              </div>
-              <div style="text-align:right;">
-                <span class="mf-pill">Premium</span>
-                <div style="height:6px;"></div>
-                <span class="mf-pill">Dark</span>
-              </div>
-            </div>
-            <div style="height:14px;"></div>
-        """,
-        unsafe_allow_html=True,
-    )
-    u = st.text_input("Username", value="")   # C1 empty
-    p = st.text_input("Password", value="", type="password")  # C1 empty
-    ok = st.button("Sign in", use_container_width=True)
+
+    # Lightweight login UI (mobile-friendly)
+    st.markdown(f"## 🔐 {APP_NAME}")
+    st.caption("Sign in to continue.")
+
+    with st.form("login_form", clear_on_submit=False, border=True):
+        u = st.text_input("Username", value="", autocomplete="username")
+        p = st.text_input("Password", value="", type="password", autocomplete="current-password")
+        ok = st.form_submit_button("Sign in", use_container_width=True)
+
     if ok:
         if auth_ok(u, p):
             st.session_state["authed"] = True
@@ -971,10 +982,12 @@ def require_login():
             st.rerun()
         else:
             st.error("Invalid username or password.")
-    st.markdown("</div></div>", unsafe_allow_html=True)
+
     st.stop()
 
 require_login()
+
+
 
 
 # =============================
@@ -1059,7 +1072,7 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    cA, cB = st.columns([1, 1])
+    cA, cB, cC = st.columns([1, 1, 1])
     with cA:
         if st.button("Refresh", use_container_width=True):
             refresh_all_from_sheets()
@@ -1069,6 +1082,8 @@ with st.sidebar:
         if st.button("Logout", use_container_width=True):
             st.session_state["authed"] = False
             st.rerun()
+    with cC:
+        st.selectbox("View", ["Auto", "Desktop", "Mobile"], key="view_mode", label_visibility="visible")
 
 
     st.divider()
@@ -1459,7 +1474,27 @@ def page_transactions():
         show["Account"] = show["Account"].apply(lambda a: f"{ACCOUNT_EMOJI_DEFAULT.get(a,'💳')} {a}" if a in ACCOUNT_EMOJI_DEFAULT else a)
         show["Confidence"] = show["AutoTag"].apply(confidence_tag)
         show = show[["Date","Type","Amount","Pay","Account","Category","Confidence","Notes"]]
-        st.dataframe(show, use_container_width=True, hide_index=True)
+
+        # Mobile-friendly cards (optional)
+        vm = st.session_state.get("view_mode", "Auto")
+        default_cards = (vm == "Mobile")
+        card_view = st.toggle("Card view", value=default_cards, key="tx_card_view")
+
+        if card_view:
+            max_n = min(300, len(show))
+            n = st.select_slider("Show last", options=[25, 50, 100, 200, max_n], value=min(50, max_n), key="tx_card_n")
+            sdf = show.head(n).copy()
+            for i, r in sdf.iterrows():
+                title = f"{r['Date']} • {r['Category']} • {r['Amount']}"
+                with st.expander(title, expanded=False):
+                    st.write(f"**Type:** {r['Type']}")
+                    st.write(f"**Pay:** {r['Pay']}")
+                    st.write(f"**Account:** {r['Account']}")
+                    st.write(f"**Confidence:** {r['Confidence']}")
+                    if str(r.get('Notes','')).strip():
+                        st.write(f"**Notes:** {r['Notes']}")
+        else:
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
         st.download_button("Download CSV", data=show.to_csv(index=False).encode("utf-8"),
                            file_name=f"{APP_NAME.replace(' ','_')}_{m}.csv", mime="text/csv")
