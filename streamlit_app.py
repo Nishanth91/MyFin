@@ -1979,15 +1979,99 @@ def page_admin():
 # =============================
 # Pages (subpages)
 # =============================
+# =============================
+# Pages (subpages) + Navigation
+# =============================
+
+def detect_mobile_mode() -> bool:
+    # Explicit override via query params
+    try:
+        qp = st.query_params
+        mv = str(qp.get("mobile", "")).strip().lower()
+        if mv in ("1", "true", "yes", "y", "on"):
+            return True
+        if mv in ("0", "false", "no", "n", "off"):
+            return False
+    except Exception:
+        pass
+
+    # Best-effort user-agent detection (works on Streamlit Cloud)
+    ua = ""
+    try:
+        ua = (st.context.headers.get("User-Agent") or "")
+    except Exception:
+        try:
+            # older streamlit fallbacks
+            ua = (st.runtime.scriptrunner.get_script_run_ctx().request.headers.get("User-Agent") or "")
+        except Exception:
+            ua = ""
+
+    ua_l = ua.lower()
+    return any(k in ua_l for k in ["iphone", "ipad", "android", "mobile"])
+
+MOBILE_MODE = detect_mobile_mode()
+
+# Use mobile Add page when on phone
+def _page_add_router():
+    if MOBILE_MODE:
+        page_add_mobile()
+    else:
+        page_add()
+
 pages = [
     st.Page(page_dashboard, title="🏠 Dashboard", url_path="dashboard"),
-    st.Page(page_add, title="➕ Add", url_path="add"),
+    st.Page(_page_add_router, title="➕ Add", url_path="add"),
     st.Page(page_creditbal, title="💳 CreditBal", url_path="creditbal"),
     st.Page(page_trends, title="📈 Trends", url_path="trends"),
     st.Page(page_transactions, title="🧾 Transactions", url_path="transactions"),
     st.Page(page_admin, title="🛡️ Admin", url_path="admin"),
 ]
-nav = st.navigation(pages, position="sidebar")
-nav.run()
 
+if MOBILE_MODE:
+    # On phones, avoid relying on the sidebar (it overlays the content).
+    # Provide an in-page navigation bar so the user never needs to open the sidebar.
+    page_keys = ["dashboard", "add", "creditbal", "trends", "transactions", "admin"]
+    page_labels = {
+        "dashboard": "🏠",
+        "add": "➕",
+        "creditbal": "💳",
+        "trends": "📈",
+        "transactions": "🧾",
+        "admin": "🛡️",
+    }
+    # Read current page from query params (fallback to dashboard)
+    try:
+        cur = str(st.query_params.get("p", "dashboard"))
+    except Exception:
+        cur = "dashboard"
+    if cur not in page_keys:
+        cur = "dashboard"
+
+    sel = st.radio(
+        "Navigate",
+        options=page_keys,
+        index=page_keys.index(cur),
+        format_func=lambda k: f"{page_labels.get(k,'•')} {k.title()}",
+        horizontal=True,
+        label_visibility="collapsed",
+        key="mobile_top_nav",
+    )
+
+    if sel != cur:
+        st.query_params["p"] = sel
+        st.rerun()
+
+    # Execute the selected page directly (no sidebar needed)
+    page_map = {
+        "dashboard": page_dashboard,
+        "add": _page_add_router,
+        "creditbal": page_creditbal,
+        "trends": page_trends,
+        "transactions": page_transactions,
+        "admin": page_admin,
+    }
+    page_map[sel]()
+else:
+    nav = st.navigation(pages, position="sidebar")
+    nav.run()
 st.caption("NishanthFinTrack 2026 • Premium Dark • Fast • Sheets-backed • Apply filters for speed • Refresh only when needed")
