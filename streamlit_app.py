@@ -303,7 +303,7 @@ div[data-testid="stDataFrame"]{
 .mf-login-sub{ margin-top: 6px; color: var(--muted); font-size: 13px; }
 
 /* ===== VF2.2: Bigger sidebar pages navigation ===== */
-section[data-testid="stSidebar"] { min-width: 340px !important; }
+section[data-testid="stSidebar"] { min-width: 280px !important; max-width: 320px !important; }
 section[data-testid="stSidebar"] .stSidebarContent { padding-top: 0.5rem; }
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] ul { gap: 6px; }
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] li a {
@@ -327,8 +327,11 @@ MOBILE_CSS = r"""
   .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; padding-top: 0.75rem !important; }
   /* full-width buttons */
   .stButton>button { width: 100% !important; }
-  /* hide sidebar on phones (navigation uses top tabs / page content) */
-  section[data-testid="stSidebar"], div[data-testid="stSidebar"] { display: none !important; }
+
+  /* sidebar width on phones (if opened) */
+  section[data-testid="stSidebar"] { width: 82vw !important; max-width: 82vw !important; }
+
+  /* sidebar stays available on phones */
   /* ensure main area uses full width */
   div[data-testid="stAppViewContainer"] > .main { margin-left: 0 !important; }
 
@@ -1198,24 +1201,57 @@ month_df = view_df[view_df["Month"] == month_sel].copy() if not view_df.empty el
 # =============================
 # Dashboard helpers
 # =============================
+def _dash_type_series(df: pd.DataFrame) -> pd.Series:
+    """Dashboard-only normalization of Type.
+
+    We treat Salary/Payroll-like categories as Income even if they were entered as Debit by mistake,
+    so the dashboard does not show Salary under Outflow / Highest debit spend.
+    """
+    if df is None or df.empty or "Type" not in df.columns:
+        return pd.Series([], dtype=str)
+
+    t = df["Type"].astype(str)
+
+    if "Category" in df.columns:
+        cat = df["Category"].astype(str).str.strip().str.lower()
+        income_cats = {
+            "salary", "payroll", "pay cheque", "paycheck", "paycheque", "wages", "bonus"
+        }
+        # If category matches common income labels, force as Credit for dashboard purposes.
+        t = t.mask(cat.isin(income_cats), "Credit")
+
+    return t
+
+
 def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
+    if df is None or df.empty:
+        return {"Credit": 0.0, "Debit": 0.0, "Investment": 0.0, "CC Repay": 0.0, "International": 0.0}
+
+    t = _dash_type_series(df)
+    amt = pd.to_numeric(df.get("Amount", 0), errors="coerce").fillna(0.0)
+
     return {
-        "Credit": float(df.loc[df["Type"] == "Credit", "Amount"].sum()) if not df.empty else 0.0,
-        "Debit": float(df.loc[df["Type"] == "Debit", "Amount"].sum()) if not df.empty else 0.0,
-        "Investment": float(df.loc[df["Type"] == "Investment", "Amount"].sum()) if not df.empty else 0.0,
-        "CC Repay": float(df.loc[df["Type"] == "CC Repay", "Amount"].sum()) if not df.empty else 0.0,
-        "International": float(df.loc[df["Type"] == "International", "Amount"].sum()) if not df.empty else 0.0,
+        "Credit": float(amt[t == "Credit"].sum()),
+        "Debit": float(amt[t == "Debit"].sum()),
+        "Investment": float(amt[t == "Investment"].sum()),
+        "CC Repay": float(amt[t == "CC Repay"].sum()),
+        "International": float(amt[t == "International"].sum()),
     }
+
 
 def hero_insight(df_all: pd.DataFrame, month: str) -> str:
     mdf = df_all[df_all["Month"] == month].copy()
     if mdf.empty:
         return "No transactions yet. Add your first one ✨"
-    ddf = mdf[mdf["Type"] == "Debit"].copy()
+
+    t = _dash_type_series(mdf)
+    ddf = mdf[t == "Debit"].copy()
+
     if not ddf.empty:
         by_cat = ddf.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
         top = by_cat.iloc[0]
         return f"Highest debit spend: **{cat_label(top['Category'])}** ({money(float(top['Amount']))})"
+
     return f"Transactions captured: **{len(mdf)}**"
 
 
