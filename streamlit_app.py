@@ -324,15 +324,36 @@ MOBILE_CSS = r"""
 <style>
 @media (max-width: 768px) {
   /* tighter page padding */
-  .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; }
-  /* make inputs/buttons easier to tap */
-  .stButton > button, .stDownloadButton > button { width: 100% !important; }
-  /* reduce chart/table overflow pain */
+  .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; padding-top: 0.75rem !important; }
+  /* full-width buttons */
+  .stButton>button { width: 100% !important; }
+  /* prevent tables from breaking layout */
   div[data-testid="stDataFrame"] { overflow-x: auto !important; }
   /* slightly smaller headings */
   h1 { font-size: 1.45rem !important; }
   h2 { font-size: 1.20rem !important; }
   h3 { font-size: 1.05rem !important; }
+
+  /* iOS Safari: ensure typed text is visible (fix white-input + white-text) */
+  input, textarea, select {
+    background-color: rgba(18,18,20,0.96) !important;
+    color: rgba(240,240,245,0.98) !important;
+    -webkit-text-fill-color: rgba(240,240,245,0.98) !important;
+    caret-color: rgba(240,240,245,0.98) !important;
+  }
+  /* Streamlit internal input wrappers */
+  div[data-baseweb="input"] input,
+  div[data-baseweb="textarea"] textarea,
+  div[data-baseweb="select"] input {
+    background-color: rgba(18,18,20,0.96) !important;
+    color: rgba(240,240,245,0.98) !important;
+    -webkit-text-fill-color: rgba(240,240,245,0.98) !important;
+  }
+  /* placeholder */
+  input::placeholder, textarea::placeholder {
+    color: rgba(240,240,245,0.55) !important;
+    -webkit-text-fill-color: rgba(240,240,245,0.55) !important;
+  }
 }
 </style>
 """
@@ -341,6 +362,15 @@ st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 # View mode override (lets you force card-layout on phones)
 if "view_mode" not in st.session_state:
     st.session_state["view_mode"] = "Auto"  # Auto | Desktop | Mobile
+
+def is_mobile_view() -> bool:
+    """
+    View mode logic:
+    - Mobile: force mobile layout
+    - Desktop: force desktop layout
+    - Auto: default to desktop (Streamlit can't reliably detect screen size server-side)
+    """
+    return st.session_state.get("view_mode", "Auto") == "Mobile"
 
 
 
@@ -1242,7 +1272,93 @@ def page_dashboard():
         fig_cat = px.bar(by_cat, x="CategoryLabel", y="Amount", title="Debit by Category", height=420, template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
         fig_cat.update_layout(bargap=0.35, margin=dict(l=10,r=10,t=50,b=10))
         st.plotly_chart(fig_cat, use_container_width=True)
+
+def page_add_mobile():
+    st.markdown("## ➕ Add")
+    if locked_now:
+        st.info("This month is locked. Switch month in sidebar or unlock in Admin.")
+
+    qd = st.session_state["quick_defaults"]
+    categories = sorted(set(list(rules.keys()) + list(CATEGORY_ICON.keys())))
+    allowed_accounts, emoji_map = build_account_maps(acct_df)
+    acct_options = [f"{emoji_map.get(a,'💳')} {a}" for a in allowed_accounts]
+    acct_map = {f"{emoji_map.get(a,'💳')} {a}": a for a in allowed_accounts}
+
+    entry_date = st.date_input("Date", value=date.today(), disabled=locked_now)
+
+    type_opts = [type_to_display(t) for t in ENTRY_TYPES]
+    default_internal = qd.get("Type", "Debit")
+    default_display = type_to_display(default_internal)
+    entry_display = st.selectbox("Type", options=type_opts, index=type_opts.index(default_display) if default_display in type_opts else 0, disabled=locked_now)
+    entry_type = display_to_type(entry_display)
+
+    # Pay method (stacked)
+    if entry_type in ("Credit", "International", "Investment"):
+        pay = "Bank"
+        st.selectbox("Pay", options=["Bank"], index=0, disabled=True)
+    elif entry_type == "CC Repay":
+        pay = "Bank"
+        st.selectbox("Pay", options=["Bank"], index=0, disabled=True)
+    else:
+        default_pay = qd.get("Pay", "Card")
+        pay = st.radio("Pay", options=PAY_METHODS, index=PAY_METHODS.index(default_pay) if default_pay in PAY_METHODS else 0, horizontal=False, disabled=locked_now)
+
+    amt_text = st.text_input("Amount ($)", value="", placeholder="e.g. 120 or 120.50", disabled=locked_now)
+    notes = st.text_area("Reason / Notes", value="", height=110, disabled=locked_now)
+
+    auto_cat = classify(notes, rules) if notes.strip() else "Uncategorized"
+    auto_idx = categories.index(auto_cat) if auto_cat in categories else categories.index("Uncategorized")
+    category = st.selectbox("Category", options=[cat_label(c) for c in categories], index=auto_idx, disabled=locked_now)
+    # map back (strip icon)
+    category_name = category.split(" ", 1)[1] if " " in category else category
+
+    # Account selection (only for Debit with Card/Bank; repay uses Bank, etc.)
+    account_name = None
+    if entry_type in ("Debit", "Credit", "Investment", "International"):
+        default_acct = qd.get("Account", allowed_accounts[0] if allowed_accounts else "")
+        default_label = f"{emoji_map.get(default_acct,'💳')} {default_acct}" if default_acct else (acct_options[0] if acct_options else "")
+        idx = acct_options.index(default_label) if default_label in acct_options else 0
+        acct_label = st.selectbox("Account", options=acct_options, index=idx, disabled=locked_now)
+        account_name = acct_map.get(acct_label, acct_label)
+
+    # Submit
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        ok = st.button("✅ Save", use_container_width=True, disabled=locked_now)
+    with c2:
+        st.button("↩️ Clear", use_container_width=True, disabled=locked_now, on_click=lambda: None)
+
+    if not ok:
+        return
+
+    # Validate
+    amt = parse_amount(amt_text)
+    if amt is None or amt <= 0:
+        st.error("Enter a valid amount greater than 0.")
+        return
+
+    # Build and write row using existing writer
+    try:
+        append_transaction(
+            entry_date=entry_date,
+            entry_type=entry_type,
+            amount=amt,
+            pay=pay,
+            account=account_name or "",
+            category=category_name,
+            notes=notes.strip(),
+            auto_tag="",
+        )
+        st.success("Saved ✅")
+        st.session_state["tx_dirty"] = True
+        st.rerun()
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+
+
 def page_add():
+    if is_mobile_view():
+        return page_add_mobile()
     st.markdown("## ➕ Add")
     if locked_now:
         st.info("This month is locked. Switch month in sidebar or unlock in Admin.")
