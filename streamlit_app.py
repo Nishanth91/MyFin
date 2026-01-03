@@ -81,6 +81,8 @@ def build_month_options(today: dt.date | None = None, past_months: int = 12, fut
 # Config
 # =============================
 st.set_page_config(page_title="NishanthFinTrack 2026", page_icon="💸", layout="wide", initial_sidebar_state="collapsed")
+st.set_option("client.showErrorDetails", False)
+st.set_option("client.toolbarMode", "minimal")
 
 APP_NAME = "NishanthFinTrack 2026"
 SHEET_NAME = "nishanthfintrack_2026"   # <-- change if your Sheet name differs
@@ -323,6 +325,10 @@ st.markdown(DARK_CSS, unsafe_allow_html=True)
 MOBILE_CSS = r"""
 <style>
 @media (max-width: 768px) {
+  /* HF5: hide sidebar overlay on mobile (we use in-page nav) */
+  section[data-testid="stSidebar"], div[data-testid="stSidebar"]{display:none !important;}
+  div[data-testid="collapsedControl"]{display:none !important;}
+
   /* tighter page padding */
   .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; padding-top: 0.75rem !important; }
   /* full-width buttons */
