@@ -80,7 +80,7 @@ def build_month_options(today: dt.date | None = None, past_months: int = 12, fut
 # =============================
 # Config
 # =============================
-st.set_page_config(page_title="NishanthFinTrack 2026", page_icon="💸", layout="wide")
+st.set_page_config(page_title="NishanthFinTrack 2026", page_icon="💸", layout="wide", initial_sidebar_state="collapsed")
 
 APP_NAME = "NishanthFinTrack 2026"
 SHEET_NAME = "nishanthfintrack_2026"   # <-- change if your Sheet name differs
@@ -327,6 +327,15 @@ MOBILE_CSS = r"""
   .block-container { padding-left: 0.85rem !important; padding-right: 0.85rem !important; padding-top: 0.75rem !important; }
   /* full-width buttons */
   .stButton>button { width: 100% !important; }
+  /* hide sidebar on phones (navigation uses top tabs / page content) */
+  section[data-testid="stSidebar"], div[data-testid="stSidebar"] { display: none !important; }
+  /* ensure main area uses full width */
+  div[data-testid="stAppViewContainer"] > .main { margin-left: 0 !important; }
+
+  /* make segmented controls wrap instead of clipping */
+  div[data-testid="stSegmentedControl"] div[data-baseweb="button-group"] { flex-wrap: wrap !important; }
+  div[data-testid="stSegmentedControl"] button { flex: 1 1 auto !important; min-width: 32% !important; }
+
   /* prevent tables from breaking layout */
   div[data-testid="stDataFrame"] { overflow-x: auto !important; }
   /* slightly smaller headings */
@@ -358,6 +367,30 @@ MOBILE_CSS = r"""
 </style>
 """
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
+# --- Auto mobile hint (client-side) ---
+# Streamlit can't reliably detect screen size server-side. For phones, we set a query param once using JS.
+st.components.v1.html("""
+<script>
+(function() {
+  try {
+    const isSmall = window.innerWidth && window.innerWidth <= 768;
+    const url = new URL(window.location.href);
+    if (isSmall && !url.searchParams.has('mobile')) {
+      url.searchParams.set('mobile','1');
+      window.location.replace(url.toString());
+    }
+  } catch (e) {}
+})();
+</script>
+""", height=0)
+# If the URL indicates mobile, default view mode to Mobile.
+try:
+    if st.query_params.get("mobile") in ("1", ["1"]):
+        st.session_state["view_mode"] = "Mobile"
+except Exception:
+    pass
+
 
 # View mode override (lets you force card-layout on phones)
 if "view_mode" not in st.session_state:
