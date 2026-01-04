@@ -1245,6 +1245,37 @@ def _dash_type_series(df: pd.DataFrame) -> pd.Series:
 
     return t
 
+def _is_income_like_rows(df: pd.DataFrame) -> pd.Series:
+    """Detect rows that look like Income (salary/payroll/etc.) based on Category/Notes text.
+
+    Used to exclude income-like rows from expense-only charts, even if they were mistakenly entered as Debit.
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=bool)
+
+    parts = []
+    if "Category" in df.columns:
+        parts.append(df["Category"].astype(str).fillna(""))
+    for note_col in ("Notes", "Reason/Notes", "Reason", "Description"):
+        if note_col in df.columns:
+            parts.append(df[note_col].astype(str).fillna(""))
+            break
+    if not parts:
+        return pd.Series(False, index=df.index)
+
+    raw = parts[0]
+    for p in parts[1:]:
+        raw = raw + " " + p
+
+    s = raw.str.strip().str.lower()
+    s = s.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+
+    income_tokens = ("salary", "payroll", "pay cheque", "paycheck", "paycheque", "wages", "bonus")
+    is_income = pd.Series(False, index=df.index)
+    for tok in income_tokens:
+        is_income = is_income | s.str.contains(rf"\b{re.escape(tok)}\b", regex=True, na=False)
+    return is_income
+
 
 def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
     if df is None or df.empty:
@@ -1286,6 +1317,8 @@ def render_debit_categories_chart(month_df: pd.DataFrame) -> None:
     _t = _dash_type_series(month_df)
     # Only true expenses (exclude Income even if mis-typed as Debit)
     ddf = month_df[_t == "Debit"].copy()
+    # Exclude income-like rows (e.g., Salary) even if mistakenly entered as Debit
+    ddf = ddf[~_is_income_like_rows(ddf)].copy()
     if ddf.empty:
         st.caption("No debit transactions this month.")
     else:
@@ -1645,6 +1678,8 @@ def page_trends():
     st.caption("Trends, top categories, top merchants, weekday spend pattern.")
 
     spend = tx_df[tx_df["Type"] == "Debit"].copy()
+    # Exclude income-like rows (e.g., Salary) even if they were mistakenly entered as Debit
+    spend = spend[~_is_income_like_rows(spend)].copy()
     if spend.empty:
         st.info("No debit transactions yet.")
     else:
