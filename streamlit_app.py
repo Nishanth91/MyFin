@@ -1045,7 +1045,7 @@ def require_login():
     with st.form("login_form", clear_on_submit=False, border=True):
         u = st.text_input("Username", value="", autocomplete="username")
         p = st.text_input("Password", value="", type="password", autocomplete="current-password")
-        ok = st.form_submit_button("Sign in", use_container_width=True)
+        ok = st.form_submit_button("Sign in", width="stretch")
 
     if ok:
         if auth_ok(u, p):
@@ -1146,12 +1146,12 @@ with st.sidebar:
     )
     cA, cB, cC = st.columns([1, 1, 1])
     with cA:
-        if st.button("Refresh", use_container_width=True):
+        if st.button("Refresh", width="stretch"):
             refresh_all_from_sheets()
             st.toast("Refreshed ✓", icon="🔄")
             st.rerun()
     with cB:
-        if st.button("Logout", use_container_width=True):
+        if st.button("Logout", width="stretch"):
             st.session_state["authed"] = False
             st.rerun()
     with cC:
@@ -1219,12 +1219,29 @@ def _dash_type_series(df: pd.DataFrame) -> pd.Series:
     t = df["Type"].astype(str)
 
     if "Category" in df.columns:
-        cat = df["Category"].astype(str).str.strip().str.lower()
-        income_cats = {
-            "salary", "payroll", "pay cheque", "paycheck", "paycheque", "wages", "bonus"
-        }
-        # If category matches common income labels, force as Credit for dashboard purposes.
-        t = t.mask(cat.isin(income_cats), "Credit")
+        # Normalize category text so emojis / punctuation don't break matching.
+        raw_cat = df["Category"].astype(str).fillna("").str.strip().str.lower()
+        # Keep only letters/spaces for robust matching (e.g., "💼 Salary" -> "salary").
+        norm_cat = raw_cat.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+
+        # If category/notes look like common income labels, force as Credit for dashboard purposes.
+        # We check both Category and Notes/Reason text because some rows may store "Salary" in notes.
+        search_text = norm_cat
+
+        # Try common note columns
+        for note_col in ("Notes", "Reason/Notes", "Reason", "Description"):
+            if note_col in df.columns:
+                raw_note = df[note_col].astype(str).fillna("").str.strip().str.lower()
+                norm_note = raw_note.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+                search_text = (search_text + " " + norm_note).str.strip()
+                break
+
+        income_tokens = ("salary", "payroll", "pay cheque", "paycheck", "paycheque", "wages", "bonus")
+        is_income = pd.Series(False, index=df.index)
+        for tok in income_tokens:
+            is_income = is_income | search_text.str.contains(rf"\b{re.escape(tok)}\b", regex=True, na=False)
+
+        t = t.mask(is_income, "Credit")
 
     return t
 
@@ -1264,6 +1281,21 @@ def hero_insight(df_all: pd.DataFrame, month: str) -> str:
 # =============================
 # Pages
 # =============================
+def render_debit_categories_chart(month_df: pd.DataFrame) -> None:
+    st.markdown("### 🧩 Debit categories (this month)")
+    _t = _dash_type_series(month_df)
+    # Only true expenses (exclude Income even if mis-typed as Debit)
+    ddf = month_df[_t == "Debit"].copy()
+    if ddf.empty:
+        st.caption("No debit transactions this month.")
+    else:
+        by_cat = ddf.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
+        by_cat["CategoryLabel"] = by_cat["Category"].apply(cat_label)
+        fig_cat = px.bar(by_cat, x="CategoryLabel", y="Amount", title="Debit by Category", height=420, template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_cat.update_layout(bargap=0.35, margin=dict(l=10,r=10,t=50,b=10))
+        st.plotly_chart(fig_cat, width="stretch")
+
+
 def page_dashboard():
     st.markdown("## 💸 Dashboard")
     st.markdown(f"<div class='mf-card mf-anim'><h4>✨ This month</h4><p class='mf-sub'>{hero_insight(tx_df, month_sel)}</p></div>", unsafe_allow_html=True)
@@ -1337,16 +1369,13 @@ def page_dashboard():
                     elif pct >= 30:
                         st.info("Good")
 
-    st.markdown("### 🧩 Debit categories (this month)")
-    ddf = month_df[month_df["Type"] == "Debit"].copy()
-    if ddf.empty:
-        st.caption("No debit transactions this month.")
-    else:
-        by_cat = ddf.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
-        by_cat["CategoryLabel"] = by_cat["Category"].apply(cat_label)
-        fig_cat = px.bar(by_cat, x="CategoryLabel", y="Amount", title="Debit by Category", height=420, template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_cat.update_layout(bargap=0.35, margin=dict(l=10,r=10,t=50,b=10))
-        st.plotly_chart(fig_cat, use_container_width=True)
+        # Debit categories chart (expenses only). On mobile, keep charts optional for faster load.
+    show_charts = True
+    if is_mobile_view():
+        show_charts = st.toggle("Show debit chart (may be slower)", value=False)
+
+    if show_charts:
+        render_debit_categories_chart(month_df)
 
 def page_add_mobile():
     st.markdown("## ➕ Add")
@@ -1387,21 +1416,30 @@ def page_add_mobile():
     # map back (strip icon)
     category_name = category.split(" ", 1)[1] if " " in category else category
 
-    # Account selection (only for Debit with Card/Bank; repay uses Bank, etc.)
-    account_name = None
-    if entry_type in ("Debit", "Credit", "Investment", "International"):
+    # Account selection
+    # - Income/Credit: no "card account" (salary isn't an expense from a card)
+    # - Expense/Debit: show Account only when Pay=Card
+    account_name = ""
+    if entry_type in ("Debit", "Investment", "International") and pay == "Card" and acct_options:
         default_acct = qd.get("Account", allowed_accounts[0] if allowed_accounts else "")
-        default_label = f"{emoji_map.get(default_acct,'💳')} {default_acct}" if default_acct else (acct_options[0] if acct_options else "")
+        default_label = f"{emoji_map.get(default_acct,'💳')} {default_acct}" if default_acct else acct_options[0]
         idx = acct_options.index(default_label) if default_label in acct_options else 0
         acct_label = st.selectbox("Account", options=acct_options, index=idx, disabled=locked_now)
         account_name = acct_map.get(acct_label, acct_label)
 
+
+    # Amount validation (prevent accidental characters)
+    amt_preview = parse_amount(amt_text) if amt_text.strip() else None
+    amt_invalid = (amt_text.strip() == "") or (amt_preview is None)
+    if amt_text.strip() != "" and amt_preview is None:
+        st.error("Amount must be a number (e.g., 120 or 120.50).")
+
     # Submit
     c1, c2 = st.columns([1, 1])
     with c1:
-        ok = st.button("✅ Save", use_container_width=True, disabled=locked_now)
+        ok = st.button("✅ Save", width="stretch", disabled=(locked_now or amt_invalid))
     with c2:
-        st.button("↩️ Clear", use_container_width=True, disabled=locked_now, on_click=lambda: None)
+        st.button("↩️ Clear", width="stretch", disabled=locked_now, on_click=lambda: None)
 
     if not ok:
         return
@@ -1492,7 +1530,7 @@ def page_add():
         account = acct_map[acct_pick]
         pay = "Bank"
     else:
-        if pay == "Card":
+        if pay == "Card" and entry_type in ("Debit", "Investment", "International"):
             default_acct = qd.get("Account", allowed_accounts[0])
             default_label = f"{emoji_map.get(default_acct, '💳')} {default_acct}"
             default_idx = acct_options.index(default_label) if default_label in acct_options else 0
@@ -1500,7 +1538,8 @@ def page_add():
             account = acct_map[acct_pick]
         else:
             st.session_state.pop("add_account", None)
-            account = ""  # C2: no Account when Pay is not Card
+            account = ""  # No Account for non-card expenses OR for Credit/Income
+
 
     cat_pick = st.selectbox("Category", [cat_label(c) for c in categories], index=auto_idx, disabled=locked_now)
     category = categories[[cat_label(c) for c in categories].index(cat_pick)]
@@ -1512,7 +1551,11 @@ def page_add():
     dom = st.number_input("Day of month (1–31)", min_value=1, max_value=31, value=1, step=1, disabled=(locked_now or not mark_rec))
     nick = st.text_input("Display name", value="", placeholder="e.g. Rent / Netflix", disabled=(locked_now or not mark_rec))
 
-    save = st.button("Save Entry", disabled=locked_now)
+    amt_preview = parse_amount(amt_text) if amt_text.strip() else None
+    amt_invalid = (amt_text.strip() == "") or (amt_preview is None)
+    if amt_text.strip() != "" and amt_preview is None:
+        st.error("Amount must be a number (e.g., 120 or 120.50).")
+    save = st.button("Save Entry", disabled=(locked_now or amt_invalid))
 
     if save:
         month_for_entry = pd.to_datetime(entry_date).to_period("M").strftime("%Y-%m")
@@ -1611,25 +1654,25 @@ def page_trends():
         fig.update_layout(height=260, margin=dict(l=10,r=10,t=40,b=10), title="Debit Trend (monthly)",
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           font=dict(color="#E8EAED"))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         c1, c2 = st.columns([1, 1])
         with c1:
             by_cat = spend.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False).head(12)
             by_cat["Category"] = by_cat["Category"].apply(cat_label)
-            st.plotly_chart(px.bar(by_cat, x="Category", y="Amount", title="Top categories", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), use_container_width=True)
+            st.plotly_chart(px.bar(by_cat, x="Category", y="Amount", title="Top categories", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), width="stretch")
         with c2:
             spend["MerchantKey"] = spend["Notes"].apply(normalize_merchant)
             by_mer = spend[spend["MerchantKey"] != ""].groupby("MerchantKey", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False).head(12)
             by_mer["MerchantKey"] = by_mer["MerchantKey"].str.title()
-            st.plotly_chart(px.bar(by_mer, x="MerchantKey", y="Amount", title="Top merchants", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), use_container_width=True)
+            st.plotly_chart(px.bar(by_mer, x="MerchantKey", y="Amount", title="Top merchants", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), width="stretch")
 
         spend["Weekday"] = spend["Date"].dt.day_name()
         wd = spend.groupby(["Weekday"], as_index=False)["Amount"].sum()
         order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         wd["Weekday"] = pd.Categorical(wd["Weekday"], categories=order, ordered=True)
         wd.sort_values("Weekday", inplace=True)
-        st.plotly_chart(px.bar(wd, x="Weekday", y="Amount", title="Spend by weekday", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), use_container_width=True)
+        st.plotly_chart(px.bar(wd, x="Weekday", y="Amount", title="Spend by weekday", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2), width="stretch")
 def page_transactions():
     st.markdown("## 🧾 Transactions")
     st.caption("Fast search + export. Edit/Delete in Admin → Fix Mistakes.")
@@ -1685,7 +1728,7 @@ def page_transactions():
                     if str(r.get('Notes','')).strip():
                         st.write(f"**Notes:** {r['Notes']}")
         else:
-            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.dataframe(show, width="stretch", hide_index=True)
 
         st.download_button("Download CSV", data=show.to_csv(index=False).encode("utf-8"),
                            file_name=f"{APP_NAME.replace(' ','_')}_{m}.csv", mime="text/csv")
@@ -1718,7 +1761,7 @@ def page_admin():
 
         # Show table
         view = acct_df.copy()
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
 
         allowed_accounts, emoji_map = build_account_maps(acct_df)
 
@@ -1734,7 +1777,7 @@ def page_admin():
 
         c1, c2 = st.columns([1, 1])
         with c1:
-            if st.button("Save Account", use_container_width=True):
+            if st.button("Save Account", width="stretch"):
                 df2 = acct_df.copy()
                 df2.loc[df2["Account"] == acct, "Emoji"] = new_emoji.strip() or emoji_map.get(acct, "💳")
                 df2.loc[df2["Account"] == acct, "Limit"] = float(new_limit)
@@ -1744,7 +1787,7 @@ def page_admin():
                 st.rerun()
         with c2:
             # Remove account (card)
-            if st.button("Remove Account", use_container_width=True):
+            if st.button("Remove Account", width="stretch"):
                 df2 = acct_df.copy()
                 df2 = df2[df2["Account"] != acct].copy()
                 # Safety: ensure at least one account remains
@@ -1808,7 +1851,7 @@ def page_admin():
             temp["Account"] = temp["Account"].apply(lambda a: f"{emoji_map_live.get(a,'💳')} {a}" if a in allowed_accounts_live else a)
             temp["Confidence"] = temp["AutoTag"].apply(confidence_tag)
             st.dataframe(temp[["Date","Type","Amount","Pay","Account","Category","Confidence","Notes","TxId","_row","AutoTag"]],
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
             if not subset.empty:
                 choices = subset.apply(lambda r: f"{r['Date'].date()} | {r['Type']} | {money(r['Amount'])} | {r['Account']} | {r['Category']} | {r['TxId']}", axis=1).tolist()
@@ -1906,7 +1949,7 @@ def page_admin():
             show["Account"] = show["Account"].apply(lambda a: f"{emoji_map_live.get(a,'💳')} {a}")
             show["Category"] = show["Category"].apply(lambda c: cat_label(c) if c else cat_label("Uncategorized"))
             show["Amount"] = show["Amount"].apply(lambda x: money(x) if pd.notna(x) else "—")
-            st.dataframe(show[["Nickname","Amount","Account","Category","DayOfMonth"]], use_container_width=True, hide_index=True)
+            st.dataframe(show[["Nickname","Amount","Account","Category","DayOfMonth"]], width="stretch", hide_index=True)
 
             st.markdown("#### Edit one")
             mk = st.selectbox("MerchantKey", pdf["MerchantKey"].astype(str).tolist(), index=0)
