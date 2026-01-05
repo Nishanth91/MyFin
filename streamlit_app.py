@@ -1245,36 +1245,47 @@ def _dash_type_series(df: pd.DataFrame) -> pd.Series:
 
     return t
 
-def _is_income_like_rows(df: pd.DataFrame) -> pd.Series:
-    """Detect rows that look like Income (salary/payroll/etc.) based on Category/Notes text.
 
-    Used to exclude income-like rows from expense-only charts, even if they were mistakenly entered as Debit.
+def _is_income_like(df: pd.DataFrame) -> pd.Series:
+    """Return boolean mask for rows that look like Income (Salary/Payroll/etc.), based on Category/Notes.
+
+    This is used to *exclude* income-like rows from expense-only charts, even if they were accidentally
+    saved as Debit historically.
     """
     if df is None or df.empty:
         return pd.Series([], dtype=bool)
 
+    # Build normalized search text from Category + first available notes column
     parts = []
     if "Category" in df.columns:
-        parts.append(df["Category"].astype(str).fillna(""))
+        raw_cat = df["Category"].astype(str).fillna("").str.strip().str.lower()
+        norm_cat = raw_cat.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+        parts.append(norm_cat)
+
+    note_series = None
     for note_col in ("Notes", "Reason/Notes", "Reason", "Description"):
         if note_col in df.columns:
-            parts.append(df[note_col].astype(str).fillna(""))
+            raw_note = df[note_col].astype(str).fillna("").str.strip().str.lower()
+            norm_note = raw_note.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+            note_series = norm_note
             break
+    if note_series is not None:
+        parts.append(note_series)
+
     if not parts:
         return pd.Series(False, index=df.index)
 
-    raw = parts[0]
+    search_text = parts[0]
     for p in parts[1:]:
-        raw = raw + " " + p
+        search_text = (search_text + " " + p).str.strip()
 
-    s = raw.str.strip().str.lower()
-    s = s.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
-
-    income_tokens = ("salary", "payroll", "pay cheque", "paycheck", "paycheque", "wages", "bonus")
-    is_income = pd.Series(False, index=df.index)
+    # Keep token list intentionally tight to avoid excluding genuine expenses like "Pay Credit Card"
+    income_tokens = ("salary", "payroll", "paycheck", "pay cheque", "paycheque", "wages", "bonus", "income")
+    mask = pd.Series(False, index=df.index)
     for tok in income_tokens:
-        is_income = is_income | s.str.contains(rf"\b{re.escape(tok)}\b", regex=True, na=False)
-    return is_income
+        mask = mask | search_text.str.contains(rf"\b{re.escape(tok)}\b", regex=True, na=False)
+
+    return mask
 
 
 def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
@@ -1300,6 +1311,7 @@ def hero_insight(df_all: pd.DataFrame, month: str) -> str:
 
     t = _dash_type_series(mdf)
     ddf = mdf[t == "Debit"].copy()
+    ddf = ddf[~_is_income_like(ddf)].copy()
 
     if not ddf.empty:
         by_cat = ddf.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
@@ -1317,8 +1329,7 @@ def render_debit_categories_chart(month_df: pd.DataFrame) -> None:
     _t = _dash_type_series(month_df)
     # Only true expenses (exclude Income even if mis-typed as Debit)
     ddf = month_df[_t == "Debit"].copy()
-    # Exclude income-like rows (e.g., Salary) even if mistakenly entered as Debit
-    ddf = ddf[~_is_income_like_rows(ddf)].copy()
+    ddf = ddf[~_is_income_like(ddf)].copy()
     if ddf.empty:
         st.caption("No debit transactions this month.")
     else:
@@ -1677,9 +1688,9 @@ def page_trends():
     st.markdown("## 📈 Trends")
     st.caption("Trends, top categories, top merchants, weekday spend pattern.")
 
-    spend = tx_df[tx_df["Type"] == "Debit"].copy()
-    # Exclude income-like rows (e.g., Salary) even if they were mistakenly entered as Debit
-    spend = spend[~_is_income_like_rows(spend)].copy()
+    t = _dash_type_series(tx_df)
+    spend = tx_df[t == "Debit"].copy()
+    spend = spend[~_is_income_like(spend)].copy()
     if spend.empty:
         st.info("No debit transactions yet.")
     else:
