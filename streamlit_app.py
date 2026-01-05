@@ -672,27 +672,77 @@ def refresh_accounts_from_sheets() -> None:
 
 
 def refresh_transactions_from_sheets() -> None:
-    """Read Transactions sheet (largest)."""
+    """Read Transactions sheet (largest).
+
+    HF7: Make header handling robust.
+    - If sheet headers differ by casing/spacing or common synonyms, map them.
+    - If headers are unrecognized but column counts match, assume the sheet is already in TX_HEADERS order.
+    """
     ss = open_sheet()
     ws_tx = ensure_ws(ss, TAB_TRANSACTIONS, TX_HEADERS, rows=10000)
     values = gs_call(ws_tx.get_all_values)
+
+    def _norm(h: str) -> str:
+        return re.sub(r"\s+", "", str(h or "").strip().lower())
+
+    # Common header synonyms from older versions / user-edits
+    synonyms = {
+        "txid": "TxId",
+        "transactionid": "TxId",
+        "transaction_id": "TxId",
+        "id": "TxId",
+        "created": "CreatedAt",
+        "createdat": "CreatedAt",
+        "created_at": "CreatedAt",
+        "autotag": "AutoTag",
+        "auto_tag": "AutoTag",
+        "merchant": "Notes",
+        "reason": "Notes",
+        "description": "Notes",
+        "payment": "Pay",
+        "paymenttype": "Pay",
+        "paymentmethod": "Pay",
+    }
+    norm_to_canon = {_norm(k): v for k, v in synonyms.items()}
+    for c in TX_HEADERS:
+        norm_to_canon[_norm(c)] = c  # exact canonical
+
     if not values or len(values) < 2:
         tx_df = pd.DataFrame(columns=TX_HEADERS + ["_row", "Month"])
     else:
-        hdr = values[0]
+        raw_hdr = values[0]
         rows = values[1:]
-        df = pd.DataFrame(rows, columns=hdr)
-        for col in TX_HEADERS:
-            if col not in df.columns:
-                df[col] = ""
-        df = df[TX_HEADERS]
+
+        # Build mapping from sheet columns -> canonical TX_HEADERS
+        sheet_norm = [_norm(h) for h in raw_hdr]
+        mapped_cols = [norm_to_canon.get(n, "") for n in sheet_norm]
+
+        # Case 1: We can map at least Date/Amount (minimum viable)
+        can_map = ("Date" in mapped_cols) and ("Amount" in mapped_cols)
+
+        if can_map:
+            df_raw = pd.DataFrame(rows, columns=raw_hdr)
+            df = pd.DataFrame()
+            for canon in TX_HEADERS:
+                try:
+                    src_idx = mapped_cols.index(canon)
+                    df[canon] = df_raw[raw_hdr[src_idx]]
+                except ValueError:
+                    df[canon] = ""
+        else:
+            # Case 2: headers unrecognized; fall back to positional if widths align
+            if len(raw_hdr) >= len(TX_HEADERS):
+                df = pd.DataFrame([r[:len(TX_HEADERS)] for r in rows], columns=TX_HEADERS)
+            else:
+                padded = [r + [""] * (len(TX_HEADERS) - len(r)) for r in rows]
+                df = pd.DataFrame(padded, columns=TX_HEADERS)
+
         df["_row"] = [i + 2 for i in range(len(df))]
         tx_df = df
 
         tx_df["Date"] = pd.to_datetime(tx_df["Date"], errors="coerce").dt.normalize()
         tx_df["Amount"] = pd.to_numeric(tx_df["Amount"], errors="coerce").fillna(0.0)
 
-        # Derive Month (YYYY-MM) once so filters don\'t depend on recomputation
         if "Month" not in tx_df.columns:
             tx_df["Month"] = ""
         tx_df["Month"] = tx_df["Date"].dt.to_period("M").astype(str)
@@ -1246,48 +1296,6 @@ def _dash_type_series(df: pd.DataFrame) -> pd.Series:
     return t
 
 
-def _is_income_like(df: pd.DataFrame) -> pd.Series:
-    """Return boolean mask for rows that look like Income (Salary/Payroll/etc.), based on Category/Notes.
-
-    This is used to *exclude* income-like rows from expense-only charts, even if they were accidentally
-    saved as Debit historically.
-    """
-    if df is None or df.empty:
-        return pd.Series([], dtype=bool)
-
-    # Build normalized search text from Category + first available notes column
-    parts = []
-    if "Category" in df.columns:
-        raw_cat = df["Category"].astype(str).fillna("").str.strip().str.lower()
-        norm_cat = raw_cat.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
-        parts.append(norm_cat)
-
-    note_series = None
-    for note_col in ("Notes", "Reason/Notes", "Reason", "Description"):
-        if note_col in df.columns:
-            raw_note = df[note_col].astype(str).fillna("").str.strip().str.lower()
-            norm_note = raw_note.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
-            note_series = norm_note
-            break
-    if note_series is not None:
-        parts.append(note_series)
-
-    if not parts:
-        return pd.Series(False, index=df.index)
-
-    search_text = parts[0]
-    for p in parts[1:]:
-        search_text = (search_text + " " + p).str.strip()
-
-    # Keep token list intentionally tight to avoid excluding genuine expenses like "Pay Credit Card"
-    income_tokens = ("salary", "payroll", "paycheck", "pay cheque", "paycheque", "wages", "bonus", "income")
-    mask = pd.Series(False, index=df.index)
-    for tok in income_tokens:
-        mask = mask | search_text.str.contains(rf"\b{re.escape(tok)}\b", regex=True, na=False)
-
-    return mask
-
-
 def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
     if df is None or df.empty:
         return {"Credit": 0.0, "Debit": 0.0, "Investment": 0.0, "CC Repay": 0.0, "International": 0.0}
@@ -1311,7 +1319,6 @@ def hero_insight(df_all: pd.DataFrame, month: str) -> str:
 
     t = _dash_type_series(mdf)
     ddf = mdf[t == "Debit"].copy()
-    ddf = ddf[~_is_income_like(ddf)].copy()
 
     if not ddf.empty:
         by_cat = ddf.groupby("Category", as_index=False)["Amount"].sum().sort_values("Amount", ascending=False)
@@ -1329,7 +1336,6 @@ def render_debit_categories_chart(month_df: pd.DataFrame) -> None:
     _t = _dash_type_series(month_df)
     # Only true expenses (exclude Income even if mis-typed as Debit)
     ddf = month_df[_t == "Debit"].copy()
-    ddf = ddf[~_is_income_like(ddf)].copy()
     if ddf.empty:
         st.caption("No debit transactions this month.")
     else:
@@ -1688,9 +1694,7 @@ def page_trends():
     st.markdown("## 📈 Trends")
     st.caption("Trends, top categories, top merchants, weekday spend pattern.")
 
-    t = _dash_type_series(tx_df)
-    spend = tx_df[t == "Debit"].copy()
-    spend = spend[~_is_income_like(spend)].copy()
+    spend = tx_df[tx_df["Type"] == "Debit"].copy()
     if spend.empty:
         st.info("No debit transactions yet.")
     else:
