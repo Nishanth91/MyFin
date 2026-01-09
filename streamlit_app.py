@@ -34,6 +34,7 @@ import json
 import re
 import uuid
 import time
+import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -85,6 +86,7 @@ st.set_option("client.showErrorDetails", False)
 st.set_option("client.toolbarMode", "minimal")
 
 APP_NAME = "NishanthFinTrack 2026"
+APP_VERSION = "VF2_12_HF10b"
 SHEET_NAME = "nishanthfintrack_2026"   # <-- change if your Sheet name differs
 
 # Hardcoded auth as requested
@@ -102,7 +104,7 @@ ACCOUNT_EMOJI_DEFAULT = {
 ALLOWED_ACCOUNTS = list(ACCOUNT_EMOJI_DEFAULT.keys())
 
 # Types + emoji (C3 redesign)
-TYPE_EMOJI = {"Debit": "🧾", "Credit": "💰", "Investment": "💹", "CC Repay": "💳", "International": "🌍"}
+TYPE_EMOJI = {"Debit": "🧾", "Credit": "💰", "Investment": "💹", "CC Repay": "💳", "International": "🌍", "LOC Draw": "🏦", "LOC Repay": "↩️"}
 ENTRY_TYPES = list(TYPE_EMOJI.keys())
 PAY_METHODS = ["Card", "Bank", "Cash"]  # C7: Salary uses Bank label
 
@@ -155,6 +157,8 @@ CATEGORY_ICON = {
     "Investment": "💹",
     "India Transfer": "🌍",
     "Banking/Fees": "🏦",
+    "LOC Utilization": "🏦",
+    "Repayment": "↩️",
     "Entertainment": "🎬",
     "Uncategorized": "❓",
 }
@@ -518,29 +522,56 @@ def open_sheet() -> gspread.Spreadsheet:
 
 
 def gs_call(fn, *args, **kwargs):
-    """Google Sheets API call with small exponential backoff on 429 quota errors."""
+    """Google Sheets API call with exponential backoff on 429/5xx errors.
+
+    HF8: Streamlit reruns can spike read requests; this wrapper reduces crashes by retrying
+    with jittered exponential backoff.
+    """
     last_err = None
-    for attempt in range(4):
+    for attempt in range(8):
         try:
             return fn(*args, **kwargs)
         except gspread.exceptions.APIError as e:
             last_err = e
             s = str(e)
-            # Quota / rate limit
-            if "429" in s or "Quota exceeded" in s or "Read requests" in s:
-                time.sleep(0.8 * (2 ** attempt))
+            # Quota / rate limit or transient backend errors
+            if ("[429]" in s) or ("429" in s) or ("Quota exceeded" in s) or ("Read requests" in s) or ("[500]" in s) or ("[503]" in s):
+                # jittered exponential backoff, capped
+                sleep_s = min(30.0, (1.0 * (2 ** attempt)) + random.random())
+                time.sleep(sleep_s)
                 continue
             raise
     raise last_err
 
+def _get_ws_map(ss: gspread.Spreadsheet) -> Dict[str, gspread.Worksheet]:
+    """HF8: Cache worksheet objects to avoid repeated spreadsheet metadata reads."""
+    ws_map = st.session_state.get("_ws_map")
+    if ws_map is None or st.session_state.get("_ws_map_id") != ss.id:
+        wss = gs_call(ss.worksheets)  # one metadata call
+        ws_map = {w.title: w for w in wss}
+        st.session_state["_ws_map"] = ws_map
+        st.session_state["_ws_map_id"] = ss.id
+    return ws_map
+
+
 def ensure_ws(ss: gspread.Spreadsheet, title: str, headers: List[str], rows: int = 2000) -> gspread.Worksheet:
-    """Ensure worksheet exists and headers are correct (header check only once per session)."""
-    try:
-        ws = gs_call(ss.worksheet, title)
+    """Ensure worksheet exists and headers are correct (header check only once per session).
+
+    HF8: Uses cached worksheet map to reduce Google Sheets read requests.
+    """
+    ws_map = _get_ws_map(ss)
+
+    if title in ws_map:
+        ws = ws_map[title]
         created = False
-    except gspread.WorksheetNotFound:
+    else:
         ws = gs_call(ss.add_worksheet, title=title, rows=rows, cols=max(25, len(headers) + 10))
         created = True
+        # refresh map once after creation
+        st.session_state.pop("_ws_map", None)
+        ws_map = _get_ws_map(ss)
+        ws_map[title] = ws
+        st.session_state["_ws_map"] = ws_map
 
     ensured = st.session_state.setdefault("_ensured_headers", set())
     if created or title not in ensured:
@@ -907,13 +938,13 @@ def ensure_recurring_for_month(month_str: str) -> int:
 # =============================
 def compute_balance_events(tx: pd.DataFrame) -> pd.DataFrame:
     df = tx[tx["Account"].isin(allowed_accounts_live)].copy()
-    charges = df[(df["Type"] == "Debit") & (df["Pay"] == "Card")].copy()
-    charges["Kind"] = "Charge"
+    charges = df[((df["Type"] == "Debit") & (df["Pay"] == "Card")) | (df["Type"] == "LOC Draw")].copy()
     charges["Delta"] = charges["Amount"]
+    charges["Kind"] = "Charge"
 
-    pays = df[df["Type"] == "CC Repay"].copy()
-    pays["Kind"] = "Payment"
+    pays = df[(df["Type"] == "CC Repay") | (df["Type"] == "LOC Repay")].copy()
     pays["Delta"] = -pays["Amount"]
+    pays["Kind"] = "Payment"
 
     use = pd.concat([charges, pays], ignore_index=True)
     if use.empty:
@@ -925,9 +956,10 @@ def compute_balance_events(tx: pd.DataFrame) -> pd.DataFrame:
     bal = {a: 0.0 for a in allowed_accounts_live}
     out = []
     for _, r in use.iterrows():
-        a = r["Account"]
-        bal[a] = max(0.0, bal[a] + float(r["Delta"]))
-        out.append({"Date": r["Date"], "Month": r["Month"], "Account": a, "Delta": float(r["Delta"]), "Balance": bal[a], "Kind": r["Kind"]})
+        a = r.get("Account", "")
+        d = float(r.get("Delta", 0.0))
+        bal[a] = max(0.0, bal.get(a, 0.0) + d)
+        out.append({"Date": r.get("Date"), "Month": r.get("Month"), "Account": a, "Delta": d, "Balance": bal[a], "Kind": r.get("Kind", "")})
     return pd.DataFrame(out)
 
 def cycle_bounds(month_str: str, billing_day: int) -> Tuple[date, date]:
@@ -1089,7 +1121,7 @@ def require_login():
         return
 
     # Lightweight login UI (mobile-friendly)
-    st.markdown(f"## 🔐 {APP_NAME}")
+    st.markdown(f"## 🔐 {APP_NAME}  ·  {APP_VERSION}")
     st.caption("Sign in to continue.")
 
     with st.form("login_form", clear_on_submit=False, border=True):
@@ -1115,8 +1147,22 @@ require_login()
 # =============================
 # First sync (only once per session)
 # =============================
-if "tx_df" not in st.session_state:
-    refresh_all_from_sheets()
+if "tx_df" not in st.session_state and not st.session_state.get("did_initial_refresh"):
+    # Mark immediately to prevent multiple rapid reruns from re-triggering a full refresh.
+    st.session_state["did_initial_refresh"] = True
+    try:
+        refresh_all_from_sheets()
+    except gspread.exceptions.APIError as e:
+        # If Google throttles reads (429), show a friendly message instead of crashing.
+        s = str(e)
+        if ("[429]" in s) or ("429" in s) or ("Quota exceeded" in s) or ("Read requests" in s):
+            st.error("Google Sheets rate limit reached (HTTP 429). Please wait ~60 seconds and click Refresh.")
+            # Allow the user to retry manually.
+            st.session_state["tx_df"] = pd.DataFrame(columns=TX_HEADERS + ["_row", "Month"])
+            st.session_state["accounts_df"] = pd.DataFrame(columns=ACCT_HEADERS + ["_row"])
+            st.session_state["admin_df"] = pd.DataFrame(columns=ADMIN_HEADERS + ["_row"])
+            st.stop()
+        raise
 
 # Dirty-flag refreshes (avoid full re-read after small mutations)
 if st.session_state.get("admin_dirty"):
@@ -1296,6 +1342,35 @@ def _dash_type_series(df: pd.DataFrame) -> pd.Series:
     return t
 
 
+def _is_nonexpense_movement(df: pd.DataFrame) -> pd.Series:
+    """Rows that should NOT be counted as 'Expense' even if Type is Debit.
+
+    HF9: Exclude LOC utilization and transfers from expense charts while still tracking them.
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=bool)
+
+    # normalize helpers
+    cat = df.get("Category", "").astype(str).fillna("").str.strip().str.lower()
+    acc = df.get("Account", "").astype(str).fillna("").str.strip().str.lower()
+    pay = df.get("Pay", "").astype(str).fillna("").str.strip().str.lower()
+    typ = df.get("Type", "").astype(str).fillna("").str.strip()
+
+    # Non-expense by Type
+    is_move = (typ == "International") | (typ == "CC Repay") | (typ == "LOC Draw") | (typ == "LOC Repay")
+
+    # LOC utilization: any Debit 'Card' charge posted to LOC account
+    is_loc = acc.str.contains(r"\bline\s*of\s*credit\b|\bloc\b", regex=True, na=False) & (pay == "card") & (typ == "Debit")
+
+    # Remittance / transfer categories (these are movements, not consumption)
+    is_remit = cat.str.contains(r"india|remit|remittance|international\s*transfer|transfer\s*abroad|send\s*home", regex=True, na=False)
+
+    # Repayments are not expenses
+    is_repay_cat = cat.str.contains(r"repay|repayment", regex=True, na=False)
+
+    return is_move | is_loc | is_remit | is_repay_cat
+
+
 def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
     if df is None or df.empty:
         return {"Credit": 0.0, "Debit": 0.0, "Investment": 0.0, "CC Repay": 0.0, "International": 0.0}
@@ -1305,7 +1380,7 @@ def monthly_summary(df: pd.DataFrame) -> Dict[str, float]:
 
     return {
         "Credit": float(amt[t == "Credit"].sum()),
-        "Debit": float(amt[t == "Debit"].sum()),
+        "Debit": float(amt[(t == "Debit") & (~_is_nonexpense_movement(df))].sum()),
         "Investment": float(amt[t == "Investment"].sum()),
         "CC Repay": float(amt[t == "CC Repay"].sum()),
         "International": float(amt[t == "International"].sum()),
@@ -1427,98 +1502,6 @@ def page_dashboard():
     if show_charts:
         render_debit_categories_chart(month_df)
 
-def page_add_mobile():
-    st.markdown("## ➕ Add")
-    if locked_now:
-        st.info("This month is locked. Switch month in sidebar or unlock in Admin.")
-
-    qd = st.session_state["quick_defaults"]
-    categories = sorted(set(list(rules.keys()) + list(CATEGORY_ICON.keys())))
-    allowed_accounts, emoji_map = build_account_maps(acct_df)
-    acct_options = [f"{emoji_map.get(a,'💳')} {a}" for a in allowed_accounts]
-    acct_map = {f"{emoji_map.get(a,'💳')} {a}": a for a in allowed_accounts}
-
-    entry_date = st.date_input("Date", value=date.today(), disabled=locked_now)
-
-    type_opts = [type_to_display(t) for t in ENTRY_TYPES]
-    default_internal = qd.get("Type", "Debit")
-    default_display = type_to_display(default_internal)
-    entry_display = st.selectbox("Type", options=type_opts, index=type_opts.index(default_display) if default_display in type_opts else 0, disabled=locked_now)
-    entry_type = display_to_type(entry_display)
-
-    # Pay method (stacked)
-    if entry_type in ("Credit", "International", "Investment"):
-        pay = "Bank"
-        st.selectbox("Pay", options=["Bank"], index=0, disabled=True)
-    elif entry_type == "CC Repay":
-        pay = "Bank"
-        st.selectbox("Pay", options=["Bank"], index=0, disabled=True)
-    else:
-        default_pay = qd.get("Pay", "Card")
-        pay = st.radio("Pay", options=PAY_METHODS, index=PAY_METHODS.index(default_pay) if default_pay in PAY_METHODS else 0, horizontal=False, disabled=locked_now)
-
-    amt_text = st.text_input("Amount ($)", value="", placeholder="e.g. 120 or 120.50", disabled=locked_now)
-    notes = st.text_area("Reason / Notes", value="", height=110, disabled=locked_now)
-
-    auto_cat = classify(notes, rules) if notes.strip() else "Uncategorized"
-    auto_idx = categories.index(auto_cat) if auto_cat in categories else categories.index("Uncategorized")
-    category = st.selectbox("Category", options=[cat_label(c) for c in categories], index=auto_idx, disabled=locked_now)
-    # map back (strip icon)
-    category_name = category.split(" ", 1)[1] if " " in category else category
-
-    # Account selection
-    # - Income/Credit: no "card account" (salary isn't an expense from a card)
-    # - Expense/Debit: show Account only when Pay=Card
-    account_name = ""
-    if entry_type in ("Debit", "Investment", "International") and pay == "Card" and acct_options:
-        default_acct = qd.get("Account", allowed_accounts[0] if allowed_accounts else "")
-        default_label = f"{emoji_map.get(default_acct,'💳')} {default_acct}" if default_acct else acct_options[0]
-        idx = acct_options.index(default_label) if default_label in acct_options else 0
-        acct_label = st.selectbox("Account", options=acct_options, index=idx, disabled=locked_now)
-        account_name = acct_map.get(acct_label, acct_label)
-
-
-    # Amount validation (prevent accidental characters)
-    amt_preview = parse_amount(amt_text) if amt_text.strip() else None
-    amt_invalid = (amt_text.strip() == "") or (amt_preview is None)
-    if amt_text.strip() != "" and amt_preview is None:
-        st.error("Amount must be a number (e.g., 120 or 120.50).")
-
-    # Submit
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        ok = st.button("✅ Save", width="stretch", disabled=(locked_now or amt_invalid))
-    with c2:
-        st.button("↩️ Clear", width="stretch", disabled=locked_now, on_click=lambda: None)
-
-    if not ok:
-        return
-
-    # Validate
-    amt = parse_amount(amt_text)
-    if amt is None or amt <= 0:
-        st.error("Enter a valid amount greater than 0.")
-        return
-
-    # Build and write row using existing writer
-    try:
-        append_transaction(
-            entry_date=entry_date,
-            entry_type=entry_type,
-            amount=amt,
-            pay=pay,
-            account=account_name or "",
-            category=category_name,
-            notes=notes.strip(),
-            auto_tag="",
-        )
-        st.success("Saved ✅")
-        st.session_state["tx_dirty"] = True
-        st.rerun()
-    except Exception as e:
-        st.error(f"Save failed: {e}")
-
-
 def page_add():
     if is_mobile_view():
         return page_add_mobile()
@@ -1560,19 +1543,44 @@ def page_add():
         # - Expense => Card/Bank/Cash
         if entry_type in ("Credit", "Investment", "International"):
             pay = st.selectbox("Pay", options=["Bank"], index=0, disabled=True, key="add_pay_fixed")
-        elif entry_type == "CC Repay":
+        elif entry_type in ("CC Repay", "LOC Repay"):
             pay = st.selectbox("Pay", options=["Bank"], index=0, disabled=True, key="add_pay_fixed_cc")
+        elif entry_type == "LOC Draw":
+            pay = st.selectbox("Pay", options=["Card"], index=0, disabled=True, key="add_pay_fixed_loc")
         else:
             default_pay = qd.get("Pay", "Card")
             pay = segmented("Pay", PAY_METHODS, default=default_pay, key="add_pay")
-
-    amt_text = st.text_input("Amount ($)", value="", placeholder="e.g. 120 or 120.50", disabled=locked_now)  # C8 empty
+    amt_text = st.text_input("Amount ($)", value="", placeholder="e.g. 120 or 120.50", disabled=locked_now)
     notes = st.text_area("Reason / Notes", value="", height=85, disabled=locked_now)
 
     auto_cat = classify(notes, rules) if notes.strip() else "Uncategorized"
     auto_idx = categories.index(auto_cat) if auto_cat in categories else categories.index("Uncategorized")
 
-    if entry_type == "CC Repay":
+    # Account selection
+    loc_candidates = [a for a in allowed_accounts if re.search(r"\bline\s*of\s*credit\b|\bloc\b", str(a), flags=re.I)]
+    loc_account = str(loc_candidates[0]).strip() if loc_candidates else ""
+
+    if entry_type == "LOC Draw":
+        pay = "Card"
+        if not loc_account:
+            st.error("No Line of Credit account found in Admin → Accounts. Add 'RBC Line of Credit' and try again.")
+            account = ""
+        else:
+            loc_label = f"{emoji_map.get(loc_account, '🏦')} {loc_account}"
+            st.selectbox("Account", options=[loc_label], index=0, disabled=True, key="add_loc_account_draw")
+            account = loc_account
+
+    elif entry_type == "LOC Repay":
+        pay = "Bank"
+        if not loc_account:
+            st.error("No Line of Credit account found in Admin → Accounts. Add 'RBC Line of Credit' and try again.")
+            account = ""
+        else:
+            loc_label = f"{emoji_map.get(loc_account, '🏦')} {loc_account}"
+            st.selectbox("Repayment to which account?", options=[loc_label], index=0, disabled=True, key="add_loc_account_repay")
+            account = loc_account
+
+    elif entry_type == "CC Repay":
         default_acct = qd.get("Account", allowed_accounts[0])
         default_label = f"{emoji_map.get(default_acct, '💳')} {default_acct}"
         default_idx = acct_options.index(default_label) if default_label in acct_options else 0
@@ -1589,11 +1597,22 @@ def page_add():
         else:
             st.session_state.pop("add_account", None)
             account = ""  # No Account for non-card expenses OR for Credit/Income
-
-
-    cat_pick = st.selectbox("Category", [cat_label(c) for c in categories], index=auto_idx, disabled=locked_now)
-    category = categories[[cat_label(c) for c in categories].index(cat_pick)]
-    used_auto = (category == auto_cat and auto_cat != "Uncategorized" and notes.strip() != "")
+    if entry_type == "LOC Draw":
+        fixed_cat = "LOC Utilization"
+        fixed_label = cat_label(fixed_cat)
+        st.selectbox("Category", options=[fixed_label], index=0, disabled=True, key="add_cat_loc_draw")
+        category = fixed_cat
+        used_auto = False
+    elif entry_type == "LOC Repay":
+        fixed_cat = "Repayment"
+        fixed_label = cat_label(fixed_cat)
+        st.selectbox("Category", options=[fixed_label], index=0, disabled=True, key="add_cat_loc_repay")
+        category = fixed_cat
+        used_auto = False
+    else:
+        cat_pick = st.selectbox("Category", [cat_label(c) for c in categories], index=auto_idx, disabled=locked_now)
+        category = categories[[cat_label(c) for c in categories].index(cat_pick)]
+        used_auto = (category == auto_cat and auto_cat != "Uncategorized" and notes.strip() != "")
 
     st.markdown("### 🔁 Recurring (optional)")
     st.caption("Turn ON once. Future months auto-add when you open the app.")
@@ -1651,6 +1670,11 @@ def page_add():
 
         st.toast("Saved ✓", icon="✅")  # soft confirmation
         st.rerun()
+
+def page_add_mobile():
+    # Mobile variant: keep behavior identical to desktop for now (avoids undefined reference).
+    return page_add()
+
 def page_creditbal():
     st.markdown("## 💳 CreditBal")
     st.caption("Billing-cycle view • Utilization • Safe-to-spend • Upcoming recurring before bill date.")
@@ -1694,7 +1718,7 @@ def page_trends():
     st.markdown("## 📈 Trends")
     st.caption("Trends, top categories, top merchants, weekday spend pattern.")
 
-    spend = tx_df[tx_df["Type"] == "Debit"].copy()
+    spend = tx_df[(tx_df["Type"] == "Debit") & (~_is_nonexpense_movement(tx_df))].copy()
     if spend.empty:
         st.info("No debit transactions yet.")
     else:
