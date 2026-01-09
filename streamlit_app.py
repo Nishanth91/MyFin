@@ -1422,85 +1422,166 @@ def render_debit_categories_chart(month_df: pd.DataFrame) -> None:
 
 
 def page_dashboard():
-    st.markdown("## 💸 Dashboard")
-    st.markdown(f"<div class='mf-card mf-anim'><h4>✨ This month</h4><p class='mf-sub'>{hero_insight(tx_df, month_sel)}</p></div>", unsafe_allow_html=True)
+    # V3_1A Dashboard (visual-only)
+    st.markdown("## 🧭 Dashboard")
+    # Assume globals: tx_df, month_df, month_sel, acct_df
+    # Friendly insight card
+    try:
+        insight = hero_insight(tx_df, month_sel)
+    except Exception:
+        insight = "Overview for the selected month."
 
-    cur = monthly_summary(tx_df[tx_df["Month"] == month_sel])
+    # Compute month summaries
+    cur = monthly_summary(tx_df[tx_df["Month"] == month_sel]) if not tx_df.empty else monthly_summary(tx_df)
     pm = prev_month_str(month_sel)
-    prev = monthly_summary(tx_df[tx_df["Month"] == pm])
+    prev = monthly_summary(tx_df[tx_df["Month"] == pm]) if (not tx_df.empty and pm) else {"Credit":0,"Debit":0,"Investment":0,"CC Repay":0,"International":0}
 
-    outflow = cur["Debit"] + cur["Investment"] + cur["CC Repay"] + cur["International"]
-    prev_outflow = prev["Debit"] + prev["Investment"] + prev["CC Repay"] + prev["International"]
-    net = cur["Credit"] - outflow
-    prev_net = prev["Credit"] - prev_outflow
+    outflow = float(cur.get("Debit",0)) + float(cur.get("Investment",0)) + float(cur.get("CC Repay",0)) + float(cur.get("International",0))
+    prev_outflow = float(prev.get("Debit",0)) + float(prev.get("Investment",0)) + float(prev.get("CC Repay",0)) + float(prev.get("International",0))
+    incoming = float(cur.get("Credit",0))
+    prev_incoming = float(prev.get("Credit",0))
+    net = incoming - outflow
+    prev_net = prev_incoming - prev_outflow
 
-    # E7 polished KPI hierarchy (final)
-    a, b, c, d = st.columns([1.25, 1.05, 1.05, 1.05])
-    a.markdown(f"<div class='mf-card mf-anim'><h4>Net</h4><p class='mf-kpi'>{money(net)}</p><p class='mf-sub'>{delta_badge(net-prev_net)} vs last month</p></div>", unsafe_allow_html=True)
-    b.markdown(f"<div class='mf-card mf-anim'><h4>Incoming</h4><p class='mf-kpi'>{money(cur['Credit'])}</p><p class='mf-sub'>{delta_badge(cur['Credit']-prev['Credit'])} vs last month</p></div>", unsafe_allow_html=True)
-    c.markdown(f"<div class='mf-card mf-anim'><h4>Outflow</h4><p class='mf-kpi'>{money(outflow)}</p><p class='mf-sub'>{delta_badge(outflow-prev_outflow)} vs last month</p></div>", unsafe_allow_html=True)
-    d.markdown(f"<div class='mf-card mf-anim'><h4>Invest</h4><p class='mf-kpi'>{money(cur['Investment'])}</p><p class='mf-sub'>{delta_badge(cur['Investment']-prev['Investment'])} vs last month</p></div>", unsafe_allow_html=True)
+    def _delta(a, b):
+        d = float(a) - float(b)
+        sign = "+" if d >= 0 else "−"
+        return f"{sign}{money(abs(d))}"
 
-    st.markdown("### 💳 Credit accounts")
-    ev = compute_balance_events(tx_df)
-    util = util_table(ev, month_sel, acct_df)
+    # HERO
+    left, right = st.columns([1.35, 1.0], gap="large")
+    with left:
+        st.markdown(
+            f"""<div class='mf-card mf-anim'>
+            <div style='display:flex;justify-content:space-between;align-items:flex-start;gap:16px;'>
+              <div>
+                <div class='mf-sub'>This month • {month_sel}</div>
+                <div style='font-size:34px;font-weight:800;line-height:1.15;margin-top:6px;'>Net: {money(net)}</div>
+                <div class='mf-sub' style='margin-top:6px;'>Δ {_delta(net, prev_net)} vs last month</div>
+              </div>
+              <div style='text-align:right;'>
+                <div class='mf-sub'>Incoming</div>
+                <div style='font-size:22px;font-weight:750;line-height:1.2;'>{money(incoming)}</div>
+                <div class='mf-sub'>Outflow</div>
+                <div style='font-size:22px;font-weight:750;line-height:1.2;'>{money(outflow)}</div>
+              </div>
+            </div>
+            <div style='margin-top:12px;'>
+              <div class='mf-pill'>Spend focus</div>
+              <span class='mf-sub' style='margin-left:10px;'>{insight}</span>
+            </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
-    rows = [util.iloc[i:i+3] for i in range(0, len(util), 3)] if not util.empty else []
-    for chunk in rows:
-        cols = st.columns(len(chunk))
-        for col, (_, r) in zip(cols, chunk.iterrows()):
-            with col:
-                lim = float(r["Limit"])
-                bal = float(r["Balance"])
-                pct = None if lim <= 0 else bal/lim*100.0
+    with right:
+        # Spend composition / health
+        debit = float(cur.get("Debit",0))
+        invest = float(cur.get("Investment",0))
+        repay = float(cur.get("CC Repay",0))
+        remit = float(cur.get("International",0))
+        st.markdown(
+            f"""<div class='mf-card mf-anim'>
+            <div style='display:flex;justify-content:space-between;align-items:center;'>
+              <div>
+                <div class='mf-sub'>Spending (Expenses only)</div>
+                <div style='font-size:26px;font-weight:800;margin-top:4px;'>{money(debit)}</div>
+                <div class='mf-sub'>Δ {_delta(debit, float(prev.get("Debit",0)))} vs last month</div>
+              </div>
+              <div class='mf-pill'>Clean view</div>
+            </div>
+            <div style='margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;'>
+              <div style='padding:10px;border-radius:14px;background:rgba(255,255,255,0.04);'>
+                <div class='mf-sub'>Invest</div>
+                <div style='font-weight:750;font-size:18px;'>{money(invest)}</div>
+              </div>
+              <div style='padding:10px;border-radius:14px;background:rgba(255,255,255,0.04);'>
+                <div class='mf-sub'>Repay</div>
+                <div style='font-weight:750;font-size:18px;'>{money(repay)}</div>
+              </div>
+              <div style='padding:10px;border-radius:14px;background:rgba(255,255,255,0.04);'>
+                <div class='mf-sub'>Remit</div>
+                <div style='font-weight:750;font-size:18px;'>{money(remit)}</div>
+              </div>
+              <div style='padding:10px;border-radius:14px;background:rgba(255,255,255,0.04);'>
+                <div class='mf-sub'>Safe-to-spend*</div>
+                <div style='font-weight:750;font-size:18px;'>{money(max(0.0, incoming - (invest + repay + remit)))}</div>
+              </div>
+            </div>
+            <div class='mf-sub' style='margin-top:10px;'>*Excludes essential bills if you categorize them under Expenses.</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
-                if pct is None:
-                    status = "Set limit in Admin"
-                elif pct < 30:
-                    status = "Healthy"
-                elif pct < 50:
-                    status = "Moderate"
-                elif pct < 70:
-                    status = "High"
-                else:
-                    status = "Risk"
+    st.markdown("### 💳 Credit health")
+    try:
+        ev = compute_balance_events(tx_df)
+        util = util_table(ev, month_sel, acct_df)
+    except Exception:
+        util = None
 
-                safe = r["SafeToSpend"]
-                safe_text = "—" if safe is None else money(float(safe))
+    if util is None or getattr(util, "empty", True):
+        st.info("No credit accounts found. Add cards/limits in **Admin → Accounts**.")
+    else:
+        # Render as 2-column grid of compact cards
+        cards = [util.iloc[i] for i in range(len(util))]
+        rows = [cards[i:i+2] for i in range(0, len(cards), 2)]
+        for rset in rows:
+            cols = st.columns(len(rset), gap="large")
+            for col, row in zip(cols, rset):
+                with col:
+                    lim = float(row.get("Limit", 0) or 0)
+                    bal = float(row.get("Balance", 0) or 0)
+                    pct = None if lim <= 0 else (bal/lim*100.0)
+                    if pct is None:
+                        status = "Set limit in Admin"
+                        badge = "<span class='mf-pill'>Needs limit</span>"
+                        bar = ""
+                    else:
+                        if pct < 30:
+                            status = "Healthy"
+                            badge = "<span class='mf-pill'>Healthy</span>"
+                        elif pct < 70:
+                            status = "Watch"
+                            badge = "<span class='mf-pill'>Watch</span>"
+                        else:
+                            status = "High"
+                            badge = "<span class='mf-pill'>High</span>"
+                        bar = f"""<div style='height:8px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden;margin-top:10px;'>
+                                  <div style='height:8px;width:{min(100,max(0,pct)):.0f}%;background:rgba(99,102,241,0.95);'></div>
+                                </div>"""
+                    st.markdown(
+                        f"""<div class='mf-card mf-anim'>
+                        <div style='display:flex;justify-content:space-between;align-items:flex-start;gap:12px;'>
+                          <div>
+                            <div style='font-weight:800;font-size:18px;'>{row.get("Account","")}</div>
+                            <div class='mf-sub'>{status}</div>
+                          </div>
+                          {badge}
+                        </div>
+                        <div style='display:flex;justify-content:space-between;margin-top:10px;'>
+                          <div>
+                            <div class='mf-sub'>Balance</div>
+                            <div style='font-weight:800;font-size:20px;'>{money(bal)}</div>
+                          </div>
+                          <div style='text-align:right;'>
+                            <div class='mf-sub'>Limit</div>
+                            <div style='font-weight:800;font-size:20px;'>{money(lim)}</div>
+                          </div>
+                        </div>
+                        {bar}
+                        <div class='mf-sub' style='margin-top:8px;'>Utilization: {"—" if pct is None else f"{pct:.0f}%"} </div>
+                        </div>""",
+                        unsafe_allow_html=True
+                    )
 
-                st.markdown(
-                    f"""
-                    <div class="mf-tile mf-anim">
-                      <p class="mf-tile-title">{r['Emoji']} {r['Account']}</p>
-                      <p class="mf-tile-num">{money(bal)}</p>
-                      <p class="mf-tile-sub">{status} • Bill date: <b>{r['BillDate']}</b></p>
-                      <div class="mf-hr"></div>
-                      <div style="display:flex; justify-content:space-between; gap:10px;">
-                        <div style="font-size:12px; color:rgba(232,234,237,0.70);">Util<br><b>{'—' if pct is None else f'{pct:.1f}%'}</b></div>
-                        <div style="font-size:12px; color:rgba(232,234,237,0.70);">Safe<br><b>{safe_text}</b></div>
-                        <div style="font-size:12px; color:rgba(232,234,237,0.70);">Cycle peak<br><b>{money(float(r['CyclePeak']))}</b></div>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                if lim > 0 and pct is not None:
-                    st.progress(min(max(pct, 0.0), 100.0)/100.0, text=f"{pct:.1f}% of {money(lim)}")
-                    if pct >= 70:
-                        st.error("High utilization ⚠️")
-                    elif pct >= 50:
-                        st.warning("Watch utilization")
-                    elif pct >= 30:
-                        st.info("Good")
-
-        # Debit categories chart (expenses only). On mobile, keep charts optional for faster load.
-    show_charts = True
-    if is_mobile_view():
-        show_charts = st.toggle("Show debit chart (may be slower)", value=False)
-
-    if show_charts:
-        render_debit_categories_chart(month_df)
+    st.markdown("### 📈 Spending snapshot")
+    # Default to showing the debit categories chart in a compact expander
+    with st.expander("View expense breakdown (expenses only)", expanded=False):
+        try:
+            render_debit_categories_chart(month_df)
+        except Exception as e:
+            st.warning("Could not render chart for this month.")
 
 def page_add():
     if is_mobile_view():
