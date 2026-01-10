@@ -86,7 +86,7 @@ st.set_option("client.showErrorDetails", False)
 st.set_option("client.toolbarMode", "minimal")
 
 APP_NAME = "NishanthFinTrack 2026"
-APP_VERSION = "VF2_12_HF10b"
+APP_VERSION = "VF3_1A_HF2"
 SHEET_NAME = "nishanthfintrack_2026"   # <-- change if your Sheet name differs
 
 # Hardcoded auth as requested
@@ -1448,6 +1448,8 @@ def page_dashboard():
         sign = "+" if d >= 0 else "−"
         return f"{sign}{money(abs(d))}"
 
+
+    net_color = "#00e676" if net >= 0 else "#ff5252"
     # HERO
     left, right = st.columns([1.35, 1.0], gap="large")
     with left:
@@ -1456,7 +1458,7 @@ def page_dashboard():
             <div style='display:flex;justify-content:space-between;align-items:flex-start;gap:16px;'>
               <div>
                 <div class='mf-sub'>This month • {month_sel}</div>
-                <div style='font-size:34px;font-weight:800;line-height:1.15;margin-top:6px;'>Net: {money(net)}</div>
+                <div style='font-size:34px;font-weight:800;line-height:1.15;margin-top:6px;'>Net: <span style='color:{net_color};'>{money(net)}</span></div>
                 <div class='mf-sub' style='margin-top:6px;'>Δ {_delta(net, prev_net)} vs last month</div>
               </div>
               <div style='text-align:right;'>
@@ -1513,6 +1515,88 @@ def page_dashboard():
             unsafe_allow_html=True,
         )
 
+
+    # Interactive spending snapshot (V3_1A_HF2)
+    st.markdown("### 🧾 Spending snapshot")
+    ddf = tx_df[(tx_df["Month"] == month_sel) & (tx_df["Type"] == "Debit")].copy() if not tx_df.empty else pd.DataFrame()
+    if ddf.empty:
+        st.caption("No expense (Debit) transactions for this month.")
+    else:
+        by_cat = (
+            ddf.groupby("Category", as_index=False)["Amount"]
+            .sum()
+            .sort_values("Amount", ascending=False)
+        )
+        by_cat["CategoryLabel"] = by_cat["Category"].apply(cat_label)
+        top = by_cat.head(8).copy()
+
+        # Keep selection sticky across reruns
+        if "dash_spend_cat" not in st.session_state or st.session_state["dash_spend_cat"] not in by_cat["Category"].tolist():
+            st.session_state["dash_spend_cat"] = top.iloc[0]["Category"]
+
+        cL, cR = st.columns([1, 1], gap="large")
+
+        with cL:
+            st.markdown("<div class='mf-card mf-anim'><div class='mf-sub'>Top categories (tap to view details)</div></div>", unsafe_allow_html=True)
+            fig1 = px.bar(
+                top.iloc[::-1],
+                x="Amount",
+                y="CategoryLabel",
+                orientation="h",
+            )
+            fig1.update_layout(
+                height=320,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title=None,
+                yaxis_title=None,
+                showlegend=False,
+            )
+            st.plotly_chart(fig1, width="stretch")
+
+            # Category 'list' selector (premium-feeling, compact)
+            for _, row in top.iterrows():
+                cat = row["Category"]
+                is_sel = (cat == st.session_state["dash_spend_cat"])
+                label = f"{cat_label(cat)}  •  {money(float(row['Amount']))}"
+                if st.button(label, key=f"dash_catbtn_{cat}", use_container_width=True, type=("primary" if is_sel else "secondary")):
+                    st.session_state["dash_spend_cat"] = cat
+
+        with cR:
+            sel = st.session_state["dash_spend_cat"]
+            st.markdown(
+                f"""<div class='mf-card mf-anim'>
+                <div class='mf-sub'>Breakdown</div>
+                <div style='font-size:20px;font-weight:850;margin-top:2px;'>{cat_label(sel)}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            sub = ddf[ddf["Category"] == sel].copy()
+
+            # Use AutoTag when present; otherwise Notes
+            label_col = "AutoTag" if ("AutoTag" in sub.columns and sub["AutoTag"].astype(str).str.strip().ne("").any()) else "Notes"
+            sub[label_col] = sub[label_col].astype(str).str.strip()
+            sub.loc[sub[label_col] == "", label_col] = "(Unlabeled)"
+
+            by_lbl = (
+                sub.groupby(label_col, as_index=False)["Amount"]
+                .sum()
+                .sort_values("Amount", ascending=False)
+            )
+
+            fig2 = px.bar(
+                by_lbl.head(12).iloc[::-1],
+                x="Amount",
+                y=label_col,
+                orientation="h",
+            )
+            fig2.update_layout(
+                height=420,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title=None,
+                yaxis_title=None,
+                showlegend=False,
+            )
+            st.plotly_chart(fig2, width="stretch")
     st.markdown("### 💳 Credit health")
     try:
         ev = compute_balance_events(tx_df)
