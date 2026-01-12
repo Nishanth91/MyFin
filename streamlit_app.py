@@ -53,12 +53,15 @@ def normalize_account_name(v: str) -> str:
     if not v:
         return ""
     s = str(v).strip()
+
+    # Strip a leading emoji/prefix token (e.g., "💳 Canadian Tire Grey Card")
     parts = s.split(" ", 1)
     if len(parts) == 2 and not any(c.isalnum() for c in parts[0]):
-        return parts[1]
+        s = parts[1].strip()
+
+    # Apply backward-compatible renames
+    s = ACCOUNT_ALIASES.get(s, s)
     return s
-
-
 
 def build_month_options(today: dt.date | None = None, past_months: int = 12, future_months: int = 3) -> list[str]:
     """Return month strings YYYY-MM for (past_months) including current + (future_months)."""
@@ -95,11 +98,19 @@ AUTH_PASSWORD = "1999"
 
 # Fixed accounts (E2) + emojis (E3)
 ACCOUNT_EMOJI_DEFAULT = {
-    "Canadian Tire Grey Card": "🛒",
-    "Canadian Tire Black Card": "🖤",
-    "Nishanth's RBC Card": "🏦",
-    "Indhu's RBC Card": "🏦",
+    "Canadian tire Mastercard - Grey": "🛒",
+    "Canadian tire Mastercard - Black": "🛒",
+    "RBC VISA": "🏦",
+    "RBC Mastercard": "🏦",
     "Line of Credit": "📉",
+}
+
+# Backward-compatible aliases (old -> new). This keeps existing sheet rows working after renames.
+ACCOUNT_ALIASES = {
+    "Canadian Tire Grey Card": "Canadian tire Mastercard - Grey",
+    "Canadian Tire Black Card": "Canadian tire Mastercard - Black",
+    "Nishanth's RBC Card": "RBC VISA",
+    "Indhu's RBC Card": "RBC Mastercard",
 }
 ALLOWED_ACCOUNTS = list(ACCOUNT_EMOJI_DEFAULT.keys())
 
@@ -409,16 +420,9 @@ except Exception:
 if "view_mode" not in st.session_state:
     st.session_state["view_mode"] = "Auto"  # Auto | Desktop | Mobile
 
-def is_mobile_view() -> bool:
-    """
-    View mode logic:
-    - Mobile: force mobile layout
-    - Desktop: force desktop layout
-    - Auto: default to desktop (Streamlit can't reliably detect screen size server-side)
-    """
-    return st.session_state.get("view_mode", "Auto") == "Mobile"
-
-
+def is_mobile_view():
+    # Mobile-specific view is disabled for now to avoid navigation issues.
+    return False
 
 # =============================
 # Helpers
@@ -1251,7 +1255,7 @@ with st.sidebar:
             st.session_state["authed"] = False
             st.rerun()
     with cC:
-        st.selectbox("View", ["Auto", "Desktop", "Mobile"], key="view_mode", label_visibility="visible")
+        view_mode = st.selectbox("View", options=["Auto"], index=0, key="view_mode", disabled=True, label_visibility="collapsed")
 
 
     st.divider()
@@ -1671,6 +1675,27 @@ def page_add():
     if is_mobile_view():
         return page_add_mobile()
     st.markdown("## ➕ Add")
+    # --- Premium Tiles: quick type selection (UI-only, logic unchanged) ---
+    if "add_type_pick" not in st.session_state:
+        st.session_state["add_type_pick"] = None
+
+    st.markdown("### Quick actions")
+    _tile_primary = [("Expense (−)", "Debit"), ("Income (+)", "Credit"), ("Invest", "Investment")]
+    _tile_actions = [("Pay Credit Card", "CC Repay"), ("Remit International", "International"), ("LOC Draw", "LOC Draw"), ("LOC Repay", "LOC Repay")]
+
+    def _render_tiles(_items, _cols=3, _key_prefix="tile"):
+        cols = st.columns(_cols, gap="small")
+        for i, (label, value) in enumerate(_items):
+            with cols[i % _cols]:
+                if st.button(label, use_container_width=True, key=f"{_key_prefix}_{i}"):
+                    st.session_state["add_type_pick"] = value
+
+                    st.rerun()
+    _render_tiles(_tile_primary, _cols=3, _key_prefix="tile_p")
+    _render_tiles(_tile_actions, _cols=4, _key_prefix="tile_a")
+
+    _pref_type = st.session_state.get("add_type_pick")
+
     if locked_now:
         st.info("This month is locked. Switch month in sidebar or unlock in Admin.")
 
@@ -1697,10 +1722,16 @@ def page_add():
     with c1:
         entry_date = st.date_input("Date", value=date.today(), disabled=locked_now)
     with c2:
-        type_opts = [type_to_display(t) for t in ENTRY_TYPES]
-        default_internal = qd.get("Type", "Debit")
-        sel_disp = segmented("Type", type_opts, default=type_to_display(default_internal), key="add_type")
-        entry_type = display_to_type(sel_disp)
+        # Primary selector = Quick actions tiles (top). Dropdown is kept in a collapsed expander as a fallback.
+        entry_type = st.session_state.get("add_type_pick")
+        if not entry_type:
+            entry_type = qd.get("Type", "Debit")
+            st.session_state["add_type_pick"] = entry_type
+            st.session_state["add_type_select"] = type_to_display(entry_type)
+        st.markdown("**Type**")
+        st.markdown(f"<div style=\"padding:8px 12px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(255,255,255,.03);display:inline-block;\">{type_to_display(entry_type)}</div>", unsafe_allow_html=True)
+        # Type is selected via Quick action tiles above.
+
     with c3:
         # Pay rules:
         # - Income/Invest/Remit International => Bank only
@@ -1720,6 +1751,38 @@ def page_add():
 
     auto_cat = classify(notes, rules) if notes.strip() else "Uncategorized"
     auto_idx = categories.index(auto_cat) if auto_cat in categories else categories.index("Uncategorized")
+
+    # --- Category chips (top spend) ---
+    if "add_cat_pick" not in st.session_state:
+        st.session_state["add_cat_pick"] = None
+
+    try:
+        _tx = st.session_state.get("tx_df")
+        _top_cats = []
+        if _tx is not None and isinstance(_tx, pd.DataFrame) and len(_tx) > 0:
+            _tmp = _tx.copy()
+            # Focus on expense categories for chips
+            if "Type" in _tmp.columns:
+                _tmp = _tmp[_tmp["Type"].astype(str).str.lower().isin(["debit", "expense", "debit (-)"])]
+            if "Date" in _tmp.columns:
+                _cut = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=90)
+                _tmp = _tmp[_tmp["Date"] >= _cut]
+            if "Category" in _tmp.columns and "Amount" in _tmp.columns:
+                _agg = _tmp.groupby("Category", dropna=False)["Amount"].sum().sort_values(ascending=False)
+                _top_cats = [c for c in _agg.head(6).index.tolist() if str(c).strip() in categories]
+        if _top_cats:
+            st.markdown("**Quick categories**")
+            _cols = st.columns(min(6, len(_top_cats)), gap="small")
+            for i, c in enumerate(_top_cats):
+                with _cols[i]:
+                    if st.button(cat_label(str(c)), use_container_width=True, key=f"qc_{i}", disabled=locked_now):
+                        st.session_state["add_cat_pick"] = str(c)
+    except Exception:
+        pass
+
+    _picked_cat = st.session_state.get("add_cat_pick")
+    if _picked_cat in categories:
+        auto_idx = categories.index(_picked_cat)
 
     # Account selection
     loc_candidates = [a for a in allowed_accounts if re.search(r"\bline\s*of\s*credit\b|\bloc\b", str(a), flags=re.I)]
@@ -1779,62 +1842,54 @@ def page_add():
         category = categories[[cat_label(c) for c in categories].index(cat_pick)]
         used_auto = (category == auto_cat and auto_cat != "Uncategorized" and notes.strip() != "")
 
-    st.markdown("### 🔁 Recurring (optional)")
-    st.caption("Turn ON once. Future months auto-add when you open the app.")
-    mark_rec = st.toggle("Mark as recurring", value=False, disabled=locked_now)
-    dom = st.number_input("Day of month (1–31)", min_value=1, max_value=31, value=1, step=1, disabled=(locked_now or not mark_rec))
-    nick = st.text_input("Display name", value="", placeholder="e.g. Rent / Netflix", disabled=(locked_now or not mark_rec))
+    with st.expander("🔁 Recurring (optional)", expanded=False):
+        st.caption("Turn ON once. Future months auto-add when you open the app.")
+        mark_rec = st.toggle("Mark as recurring", value=False, disabled=locked_now)
+        dom = st.number_input("Day of month (1–31)", min_value=1, max_value=31, value=1, step=1, disabled=(locked_now or not mark_rec))
+        nick = st.text_input("Display name", value="", placeholder="e.g. Rent / Netflix", disabled=(locked_now or not mark_rec))
 
     amt_preview = parse_amount(amt_text) if amt_text.strip() else None
     amt_invalid = (amt_text.strip() == "") or (amt_preview is None)
     if amt_text.strip() != "" and amt_preview is None:
         st.error("Amount must be a number (e.g., 120 or 120.50).")
+
+    # --- Review before Save (premium confirm) ---
+    if "pending_add" not in st.session_state:
+        st.session_state["pending_add"] = None
+    if "show_add_review" not in st.session_state:
+        st.session_state["show_add_review"] = False
+
     save = st.button("Save Entry", disabled=(locked_now or amt_invalid))
 
+    # Stage transaction for review instead of writing immediately
     if save:
-        month_for_entry = pd.to_datetime(entry_date).to_period("M").strftime("%Y-%m")
-        if month_for_entry in set(locked_months):
-            st.error(f"{month_for_entry} is locked. Unlock in Admin to add.")
-            st.stop()
-
-        amount = parse_amount(amt_text)
-        if amount is None:
-            st.error("Enter a valid amount (e.g. 120 or 120.50).")
-            st.stop()
-
-        auto_tag = f"RULE:{auto_cat}" if used_auto else "MANUAL:1"
-        txid = append_transaction(entry_date, entry_type, float(amount), pay, account, category, notes, auto_tag=auto_tag)
-        push_undo(UndoAction(kind="add", txid=txid))
-
-        # update quick defaults
-        st.session_state["quick_defaults"] = {
-            "Type": entry_type,
-            "Pay": pay,
-            "Account": account if account in allowed_accounts else qd.get("Account", allowed_accounts[0]),
-            "Category": category,
+        st.session_state["pending_add"] = {
+            "entry_date": entry_date,
+            "entry_type": entry_type,
+            "amt_text": amt_text,
+            "pay": pay,
+            "account": account,
+            "category": category,
+            "notes": notes,
+            "used_auto": used_auto,
+            "auto_cat": auto_cat,
+            "mark_rec": mark_rec,
+            "dom": dom if "dom" in locals() else 1,
+            "nick": nick if "nick" in locals() else "",
         }
+        st.session_state["show_add_review"] = True
 
-        # recurring pref
-        if mark_rec:
-            mk = normalize_merchant(notes)
-            if not mk:
-                st.warning("Couldn’t detect merchant key from notes. Add clearer notes and save again.")
-            else:
-                pref = {
-                    "MerchantKey": mk,
-                    "Nickname": (nick.strip() or mk.title()),
-                    "IsRecurring": True,
-                    "DayOfMonth": int(dom),
-                    "Category": category,
-                    "Pay": pay,
-                    "Account": account,
-                    "Amount": float(amount),
-                }
-                prefs_list2 = upsert_pref(st.session_state["prefs_list"], pref)
-                admin_update_and_refresh("recurring_prefs_json", json.dumps(prefs_list2, ensure_ascii=False))
-
-        st.toast("Saved ✓", icon="✅")  # soft confirmation
-        st.rerun()
+    if st.session_state.get("show_add_review") and st.session_state.get("pending_add"):
+        p = st.session_state["pending_add"]
+        st.markdown("### ✅ Review")
+        _amount_preview = parse_amount(p.get("amt_text","")) or 0.0
+        _notes_preview = (p['notes'][:120] + '…') if p.get('notes') and len(p['notes']) > 120 else (p.get('notes') or '—')
+        _review_md = (
+            f"**{p['entry_type']}** • **{p['category']}** • **${_amount_preview:,.2f}**\n\n"
+            f"**Pay:** {p['pay']} • **Account:** {p['account']}\n\n"
+            f"**Notes:** {_notes_preview}"
+        )
+        st.markdown(_review_md)
 
 def page_add_mobile():
     # Mobile variant: keep behavior identical to desktop for now (avoids undefined reference).
