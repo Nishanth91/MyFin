@@ -333,6 +333,49 @@ section[data-testid="stSidebar"] [data-testid="stSidebarNav"] li a svg {
   width: 20px !important; height: 20px !important;
 }
 
+
+/* --- Force dark mode / high contrast (even when OS/browser is light) --- */
+:root, html, body {
+  color-scheme: dark;
+}
+[data-testid="stAppViewContainer"], .stApp, body {
+  background: radial-gradient(1200px 600px at 15% 10%, rgba(66,99,255,0.18), rgba(0,0,0,0) 55%),
+              radial-gradient(900px 500px at 85% 20%, rgba(0,180,140,0.14), rgba(0,0,0,0) 55%),
+              #0b0f14 !important;
+  color: #e9eef7 !important;
+}
+h1,h2,h3,h4,h5,h6,p,span,div,label,small,li {
+  color: #e9eef7 !important;
+}
+::placeholder { color: rgba(233,238,247,0.55) !important; opacity: 1 !important; }
+input, textarea, [data-baseweb="input"] input, [data-baseweb="textarea"] textarea, [data-baseweb="select"] > div {
+  background-color: rgba(255,255,255,0.06) !important;
+  color: #e9eef7 !important;
+  border-color: rgba(255,255,255,0.14) !important;
+}
+[data-baseweb="select"] svg { fill: rgba(233,238,247,0.7) !important; }
+[data-testid="stSidebar"], section[data-testid="stSidebar"] {
+  background: rgba(10,13,18,0.92) !important;
+}
+
+/* tiny pill */
+.pill { display:inline-block; padding:6px 10px; border-radius:999px; font-weight:600;
+  background: rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12); }
+.pill-auto { box-shadow: 0 0 0 1px rgba(66,99,255,0.25) inset; }
+
+/* Quick actions layout: keep as 2-column grid on mobile instead of a long list */
+.quick-actions div[data-testid="stHorizontalBlock"] { gap: 10px !important; }
+@media (max-width: 768px){
+  .quick-actions div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{
+    flex: 1 1 calc(50% - 10px) !important;
+    width: calc(50% - 10px) !important;
+    min-width: calc(50% - 10px) !important;
+  }
+  .quick-actions button{
+    height: 44px !important;
+    font-size: 16px !important;
+  }
+}
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
@@ -1255,7 +1298,8 @@ with st.sidebar:
             st.session_state["authed"] = False
             st.rerun()
     with cC:
-        view_mode = st.selectbox("View", options=["Auto"], index=0, key="view_mode", disabled=True, label_visibility="collapsed")
+        view_mode = "Auto"  # locked to Auto (mobile toggle removed)
+        st.markdown('<span class="pill pill-auto">Auto</span>', unsafe_allow_html=True)
 
 
     st.divider()
@@ -1679,6 +1723,7 @@ def page_add():
     if "add_type_pick" not in st.session_state:
         st.session_state["add_type_pick"] = None
 
+    st.markdown('<div class="quick-actions">', unsafe_allow_html=True)
     st.markdown("### Quick actions")
     _tile_primary = [("Expense (−)", "Debit"), ("Income (+)", "Credit"), ("Invest", "Investment")]
     _tile_actions = [("Pay Credit Card", "CC Repay"), ("Remit International", "International"), ("LOC Draw", "LOC Draw"), ("LOC Repay", "LOC Repay")]
@@ -1717,7 +1762,9 @@ def page_add():
     acct_options = [f"{emoji_map.get(a,'💳')} {a}" for a in allowed_accounts]
     acct_map = {f"{emoji_map.get(a,'💳')} {a}": a for a in allowed_accounts}
 
-    # (VF2.3) Add page: use normal widgets (not st.form) so Pay changes can hide/show Account instantly
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# (VF2.3) Add page: use normal widgets (not st.form) so Pay changes can hide/show Account instantly
     c1, c2, c3 = st.columns([1.05, 1.2, 1.2])
     with c1:
         entry_date = st.date_input("Date", value=date.today(), disabled=locked_now)
