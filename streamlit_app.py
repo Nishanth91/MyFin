@@ -433,6 +433,59 @@ div[data-testid="stSegmentedControl"] button[aria-pressed="true"]{
 
 /* Some mobile browsers render native <select> with light palette unless color-scheme is dark */
 select { background-color: #0f1622 !important; color: #e9eefc !important; }
+
+/* --- Mobile: keep 2-column grids instead of collapsing to single column --- */
+@media (max-width: 768px){
+  /* Force Streamlit columns to remain in a 2-column grid where possible */
+  div[data-testid="stHorizontalBlock"]{
+    gap: 0.6rem !important;
+  }
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"]{
+    flex: 1 1 calc(50% - 0.6rem) !important;
+    width: calc(50% - 0.6rem) !important;
+    min-width: calc(50% - 0.6rem) !important;
+  }
+  /* If there is only one column, let it take full width */
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:only-child{
+    flex-basis: 100% !important;
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+}
+
+/* --- Darken radio/segmented controls on mobile (Safari sometimes forces light styles) --- */
+div[data-testid="stSegmentedControl"] div[role="radiogroup"]{
+  background: rgba(16,22,36,0.70) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+}
+div[data-testid="stSegmentedControl"] label{
+  color: rgba(235,240,255,0.92) !important;
+}
+div[data-testid="stSegmentedControl"] label[data-checked="true"]{
+  background: rgba(255,255,255,0.08) !important;
+  border: 1px solid rgba(255,255,255,0.20) !important;
+}
+
+/* Fallback for st.radio (pill-style) */
+div[data-testid="stRadio"] div[role="radiogroup"]{
+  background: rgba(16,22,36,0.70) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+  border-radius: 12px !important;
+  padding: 2px !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] label{
+  background: transparent !important;
+  color: rgba(235,240,255,0.92) !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] label:hover{
+  background: rgba(255,255,255,0.05) !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] label[data-checked="true"]{
+  background: rgba(255,255,255,0.08) !important;
+  border-radius: 10px !important;
+  border: 1px solid rgba(255,255,255,0.20) !important;
+}
+
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
