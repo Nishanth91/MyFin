@@ -376,6 +376,39 @@ input, textarea, [data-baseweb="input"] input, [data-baseweb="textarea"] textare
     font-size: 16px !important;
   }
 }
+
+/* --- Force dark controls even when OS/browser prefers light --- */
+@media (prefers-color-scheme: light) {
+  :root, body, .stApp { background: #0b0f14 !important; color: #e9eef7 !important; }
+}
+
+/* Segmented controls (Streamlit) */
+div[data-testid="stSegmentedControl"] button {
+  background: rgba(255,255,255,0.06) !important;
+  color: #e9eef7 !important;
+  border: 1px solid rgba(255,255,255,0.18) !important;
+}
+div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+  background: rgba(99, 145, 255, 0.35) !important;
+  border-color: rgba(120,160,255,0.55) !important;
+}
+
+/* Radio/checkbox label text (avoid washed-out light theme) */
+label, [data-testid="stMarkdownContainer"] { color: #e9eef7 !important; }
+
+/* BaseWeb (used by selectbox etc.) */
+*[data-baseweb] { color-scheme: dark; }
+
+/* Quick actions: force grid-like layout on small screens (prevent full vertical stacking) */
+@media (max-width: 740px) {
+  .quick-actions [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+  .quick-actions [data-testid="column"] {
+    flex: 0 0 calc(50% - 0.75rem) !important;
+    width: calc(50% - 0.75rem) !important;
+    min-width: 0 !important;
+  }
+}
+
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
