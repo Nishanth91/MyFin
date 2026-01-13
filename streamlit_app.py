@@ -203,6 +203,7 @@ me my of on or our ours she so than that the their them they this to up was we w
 # =============================
 DARK_CSS = """
 <style>
+:root{color-scheme:dark;} html,body{color-scheme:dark;}
 :root{
   --bg0:#070B14;
   --bg1:#0B1220;
@@ -409,6 +410,29 @@ label, [data-testid="stMarkdownContainer"] { color: #e9eef7 !important; }
   }
 }
 
+
+/* Force dark native controls on mobile even if OS is light */
+input, select, textarea, button { color-scheme: dark; }
+
+/* Fix light (white) segmented controls / radios on mobile */
+div[data-testid="stSegmentedControl"] button,
+div[data-testid="stRadio"] label,
+div[data-testid="stRadio"] div[role="radiogroup"] label,
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+div[data-testid="stSelectbox"] div[data-baseweb="select"] * {
+  background-color: rgba(255,255,255,0.06) !important;
+  color: #e9eefc !important;
+  border-color: rgba(255,255,255,0.18) !important;
+}
+
+div[data-testid="stSegmentedControl"] button[aria-pressed="true"]{
+  background-color: rgba(255,255,255,0.12) !important;
+  border-color: rgba(255,90,90,0.55) !important;
+  color: #ffffff !important;
+}
+
+/* Some mobile browsers render native <select> with light palette unless color-scheme is dark */
+select { background-color: #0f1622 !important; color: #e9eefc !important; }
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
@@ -1769,8 +1793,8 @@ def page_add():
                     st.session_state["add_type_pick"] = value
 
                     st.rerun()
-    _render_tiles(_tile_primary, _cols=3, _key_prefix="tile_p")
-    _render_tiles(_tile_actions, _cols=4, _key_prefix="tile_a")
+    _render_tiles(_tile_primary, _cols=2, _key_prefix="tile_p")
+    _render_tiles(_tile_actions, _cols=2, _key_prefix="tile_a")
 
     _pref_type = st.session_state.get("add_type_pick")
 
