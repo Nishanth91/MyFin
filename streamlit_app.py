@@ -486,6 +486,55 @@ div[data-testid="stRadio"] div[role="radiogroup"] label[data-checked="true"]{
   border: 1px solid rgba(255,255,255,0.20) !important;
 }
 
+
+/* VF3_HF1: responsive visibility helpers */
+.desktop-only { display: block; }
+.mobile-only { display: none; }
+@media (max-width: 768px){
+  .desktop-only { display: none; }
+  .mobile-only { display: block; }
+}
+
+/* VF3_HF1: Force dark styling for BaseWeb popovers/menus (fix white dropdown boxes on mobile light mode) */
+div[role="listbox"], 
+div[data-baseweb="popover"], 
+div[data-baseweb="menu"],
+div[data-baseweb="select"] ul,
+div[data-baseweb="select"] li,
+div[data-baseweb="select"] span,
+div[data-baseweb="select"] div{
+  background: #0F1624 !important;
+  color: #E9EEF7 !important;
+  border-color: rgba(255,255,255,.14) !important;
+}
+
+/* options hover/active */
+div[role="option"]:hover,
+li[role="option"]:hover{
+  background: rgba(255,255,255,.08) !important;
+}
+
+/* segmented control + radio groups */
+div[role="radiogroup"] label{
+  background: #0F1624 !important;
+  color: #E9EEF7 !important;
+  border: 1px solid rgba(255,255,255,.14) !important;
+}
+div[role="radiogroup"] label[data-checked="true"]{
+  background: rgba(255,255,255,.10) !important;
+  border: 1px solid rgba(255,255,255,.22) !important;
+}
+
+/* inputs (covers date picker text + number + text inputs) */
+input, textarea{
+  background: #0F1624 !important;
+  color: #E9EEF7 !important;
+  border: 1px solid rgba(255,255,255,.14) !important;
+}
+input::placeholder, textarea::placeholder{
+  color: rgba(233,238,247,.55) !important;
+}
+
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
@@ -681,7 +730,7 @@ def open_sheet() -> gspread.Spreadsheet:
 def gs_call(fn, *args, **kwargs):
     """Google Sheets API call with exponential backoff on 429/5xx errors.
 
-    HF8: Streamlit reruns can spike read requests; this wrapper reduces crashes by retrying
+    HF1: Streamlit reruns can spike read requests; this wrapper reduces crashes by retrying
     with jittered exponential backoff.
     """
     last_err = None
@@ -701,7 +750,7 @@ def gs_call(fn, *args, **kwargs):
     raise last_err
 
 def _get_ws_map(ss: gspread.Spreadsheet) -> Dict[str, gspread.Worksheet]:
-    """HF8: Cache worksheet objects to avoid repeated spreadsheet metadata reads."""
+    """HF1: Cache worksheet objects to avoid repeated spreadsheet metadata reads."""
     ws_map = st.session_state.get("_ws_map")
     if ws_map is None or st.session_state.get("_ws_map_id") != ss.id:
         wss = gs_call(ss.worksheets)  # one metadata call
@@ -714,7 +763,7 @@ def _get_ws_map(ss: gspread.Spreadsheet) -> Dict[str, gspread.Worksheet]:
 def ensure_ws(ss: gspread.Spreadsheet, title: str, headers: List[str], rows: int = 2000) -> gspread.Worksheet:
     """Ensure worksheet exists and headers are correct (header check only once per session).
 
-    HF8: Uses cached worksheet map to reduce Google Sheets read requests.
+    HF1: Uses cached worksheet map to reduce Google Sheets read requests.
     """
     ws_map = _get_ws_map(ss)
 
@@ -1835,6 +1884,28 @@ def page_add():
 
     st.markdown('<div class="quick-actions">', unsafe_allow_html=True)
     st.markdown("### Quick actions")
+
+    # VF3_HF1: Mobile-friendly quick action picker (prevents tiles stacking into a confusing list)
+    _qa_map = {
+        "Expense (−)": "Debit",
+        "Income (+)": "Credit",
+        "Invest": "Investment",
+        "Pay Credit Card": "CC Repay",
+        "Remit International": "International",
+        "LOC Draw": "LOC Draw",
+        "LOC Repay": "LOC Repay",
+    }
+
+    st.markdown('<div class="mobile-only">', unsafe_allow_html=True)
+    _qa_labels = ["Select…"] + list(_qa_map.keys())
+    _qa_sel = st.selectbox("Quick action", options=_qa_labels, index=0, key="qa_mobile_select")
+    st.markdown('</div>', unsafe_allow_html=True)
+    if _qa_sel and _qa_sel != "Select…":
+        st.session_state["add_type_pick"] = _qa_map[_qa_sel]
+        st.rerun()
+
+    st.markdown('<div class="desktop-only">', unsafe_allow_html=True)
+
     _tile_primary = [("Expense (−)", "Debit"), ("Income (+)", "Credit"), ("Invest", "Investment")]
     _tile_actions = [("Pay Credit Card", "CC Repay"), ("Remit International", "International"), ("LOC Draw", "LOC Draw"), ("LOC Repay", "LOC Repay")]
 
@@ -1848,6 +1919,7 @@ def page_add():
                     st.rerun()
     _render_tiles(_tile_primary, _cols=2, _key_prefix="tile_p")
     _render_tiles(_tile_actions, _cols=2, _key_prefix="tile_a")
+    st.markdown('</div>', unsafe_allow_html=True)
 
     _pref_type = st.session_state.get("add_type_pick")
 
